@@ -26,7 +26,6 @@ import math
 import socket
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor
 import sqlite3
 import requests
 from datetime import datetime, date, timedelta, timezone
@@ -377,6 +376,7 @@ SYSTEM_DEFAULTS = {
     "retention_days": 365,
     "sourcetable_mode": "v1",
     "station_coverage_km": 30.0,
+    "trimble_legacy": 1,       # 1 = Legacy-Strom /RTCM (RTCM 3.1) von der Trimble holen, 0 = nur /RTCM32
 }
 
 
@@ -408,6 +408,7 @@ class SystemSettingsIn(BaseModel):
     retention_days: int | None = None
     sourcetable_mode: str | None = None
     station_coverage_km: float | None = None
+    trimble_legacy: int | None = None
 
     @field_validator("public_hostname")
     @classmethod
@@ -431,7 +432,7 @@ SYSTEM_RANGES = {
     "near_recheck_s": (5, 3600), "near_min_dwell_s": (0, 86400), "near_hysteresis_km": (0, 1000),
     "failback_stable_s": (5, 3600), "failover_fail_threshold": (1, 20),
     "failover_recover_threshold": (1, 20), "retention_days": (7, 3650),
-    "station_coverage_km": (1, 500),
+    "station_coverage_km": (1, 500), "trimble_legacy": (0, 1),
 }
 
 
@@ -452,9 +453,11 @@ def get_system_settings_api(x_admin_token: str | None = Header(default=None)):
 def update_system_settings(body: SystemSettingsIn, x_admin_token: str | None = Header(default=None)):
     check_token(x_admin_token)
     _sys_ranges_ok(body)
+    legacy_before = get_sys("trimble_legacy")
     for k, v in body.model_dump(exclude_none=True).items():
         set_setting("sys_" + k, str(v))
-    return {"ok": True, "settings": get_all_sys()}
+    resync = write_relay_config() if get_sys("trimble_legacy") != legacy_before else None   # Relay-Zeilen aendern sich
+    return {"ok": True, "settings": get_all_sys(), "resync_status": resync}
 
 
 @app.get("/internal/proxy-settings", dependencies=[Depends(require_local)])
@@ -1287,23 +1290,30 @@ def write_relay_config():
     with open(CONF_PATH) as f:
         lines = f.readlines()
 
+    block = []
+    if get_sys("trimble_legacy"):
+        block.append(f"relay pull -m /RTCM    {trimble['host']}:{trimble['port_legacy']}\n")
+    block.append(f"relay pull -m /RTCM32  {trimble['host']}:{trimble['port_msm']}\n")
+    for station in get_regional_stations():
+        if station["caster_host"]:
+            block.append(
+                f"relay pull -i {station['caster_user']}:{station['caster_pass']} "
+                f"-m {station['mountpoint']}  {station['caster_host']}:{station['caster_port']}/{station['remote_mountpoint']}\n"
+            )
+
     new_lines = []
     inserted = False
     for line in lines:
         if line.strip().startswith("relay pull"):
             if not inserted:
-                new_lines.append(f"relay pull -m /RTCM    {trimble['host']}:{trimble['port_legacy']}\n")
-                new_lines.append(f"relay pull -m /RTCM32  {trimble['host']}:{trimble['port_msm']}\n")
-                for station in get_regional_stations():
-                    if station["caster_host"]:
-                        new_lines.append(
-                            f"relay pull -i {station['caster_user']}:{station['caster_pass']} "
-                            f"-m {station['mountpoint']}  {station['caster_host']}:{station['caster_port']}/{station['remote_mountpoint']}\n"
-                        )
+                new_lines.extend(block)
                 inserted = True
-            # weitere alte relay-Zeilen ueberspringen
-            continue
+            continue        # weitere alte relay-Zeilen ueberspringen
         new_lines.append(line)
+    if not inserted:        # noch keine relay-Zeile vorhanden -> Block anhaengen
+        if new_lines and not new_lines[-1].endswith("\n"):
+            new_lines[-1] += "\n"
+        new_lines.extend(block)
 
     with open(CONF_PATH, "w") as f:
         f.writelines(new_lines)
@@ -1332,15 +1342,16 @@ def get_forced_primaries() -> list:
     return [m for m in (get_setting("failover_forced") or "").split(",") if m]
 
 
-_live_cache = {"ts": 0.0, "data": None}
+_sources_cache = {"ts": 0.0, "data": None}
 
 
-def get_live_mountpoints():
-    """Mountpoints mit aktuell verbundener Quelle (laut Caster-Admin) oder None.
-    3 s gecacht: Proxy, Failover-Check und GUI fragen sonst jeweils einzeln den Caster."""
+def get_source_stats():
+    """Verbundene Quellen laut Caster-Admin: {Mountpoint: KBytes gelesen} oder None, wenn der Caster
+    nicht antwortet. 3 s gecacht (Proxy, Failover-Check, Trimble-Check und GUI fragen sonst einzeln).
+    Die Trimble wird dafuer NICHT angefasst: der Caster haelt ohnehin je Strom eine Verbindung."""
     now = time.monotonic()
-    if now - _live_cache["ts"] < 3.0:
-        return _live_cache["data"]
+    if now - _sources_cache["ts"] < 3.0:
+        return _sources_cache["data"]
     try:
         r = requests.get(
             f"{CASTER_URL}/admin",
@@ -1348,11 +1359,24 @@ def get_live_mountpoints():
             auth=(CASTER_ADMIN_USER, get_setting("caster_admin_pass")),
             timeout=5,
         )
-        data = {m.group(1) for m in re.finditer(r"\[Mountpoint: ([^\]]*)\]", r.text)} if r.status_code == 200 else None
+        data = None
+        if r.status_code == 200:
+            data = {}
+            for line in r.text.splitlines():
+                m = re.search(r"\[Mountpoint: ([^\]]*)\]", line)
+                if m:
+                    k = re.search(r"\[KBytes read: (\d+)\]", line)
+                    data[m.group(1)] = int(k.group(1)) if k else 0
     except Exception:
         data = None
-    _live_cache.update(ts=now, data=data)
+    _sources_cache.update(ts=now, data=data)
     return data
+
+
+def get_live_mountpoints():
+    """Mountpoints mit aktuell verbundener Quelle oder None."""
+    stats = get_source_stats()
+    return None if stats is None else set(stats)
 
 
 def create_system_alert(username: str, reason: str, kind: str = "failover", tag: str | None = None):
@@ -1427,19 +1451,23 @@ def failover_health_check():
     _failover_state["using_backup"] = any(m["active"] for m in mappings if m["primary"] == "/RTCM32")
 
 
-_trimble_state = {"down": False, "fail": 0, "ok": 0, "since": None, "last_check": None, "reachable": None}
+_trimble_state = {"down": False, "fail": 0, "ok": 0, "since": None, "last_check": None, "reachable": None, "kb": {}}
 
 
 def trimble_health_check():
-    """Prueft, ob die Basisstation (beide Ausgabe-Ports) per TCP erreichbar ist -- unabhaengig davon,
-    ob ein Backup eingetragen ist. Alarm nach `failover_fail_threshold` Fehlschlaegen in Folge;
-    der Alarm endet automatisch, sobald sie `failover_recover_threshold` Mal in Folge wieder antwortet."""
-    trimble = get_trimble_settings()
-    ports = (trimble["port_legacy"], trimble["port_msm"])
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        pings = list(pool.map(lambda p: tcp_ping_ms(trimble["host"], p, timeout=3.0), ports))
-    ok = all(p is not None for p in pings)
+    """Prueft die Basisstation OHNE eigene Verbindungen zu ihr: der Caster haelt je Strom eine
+    dauerhafte Relay-Verbindung (unabhaengig von der Zahl der Rover). Problem = Strom nicht verbunden
+    oder seit der letzten Pruefung keine neuen Daten. Alarm nach `failover_fail_threshold` Pruefungen in
+    Folge (15 s Takt); endet automatisch nach `failover_recover_threshold` guten Pruefungen."""
+    stats = get_source_stats()
+    if stats is None:
+        return                      # Caster selbst antwortet nicht -> kein Urteil ueber die Trimble
     st = _trimble_state
+    mps = ["/RTCM32"] + (["/RTCM"] if get_sys("trimble_legacy") else [])
+    not_connected = [mp for mp in mps if mp not in stats]
+    stalled = [mp for mp in mps if mp in stats and mp in st["kb"] and stats[mp] == st["kb"][mp]]
+    st["kb"] = {mp: stats[mp] for mp in mps if mp in stats}
+    ok = not not_connected and not stalled
     st["last_check"] = utcnow().isoformat()
     st["reachable"] = ok
     if ok:
@@ -1448,10 +1476,13 @@ def trimble_health_check():
     else:
         st["fail"] += 1
         st["ok"] = 0
+    trimble = get_trimble_settings()
     if not st["down"] and st["fail"] >= get_sys("failover_fail_threshold"):
         st["down"], st["since"] = True, utcnow().isoformat()
-        bad = ", ".join(str(p) for p, ms in zip(ports, pings) if ms is None)
-        msg = f"Trimble nicht erreichbar: {trimble['host']} (Port {bad})"
+        if not_connected:
+            msg = f"Trimble nicht erreichbar: {trimble['host']} ({', '.join(not_connected)} nicht verbunden)"
+        else:
+            msg = f"Trimble sendet keine Daten: {trimble['host']} ({', '.join(stalled)})"
         log_alert_engine(msg)
         create_system_alert("SYSTEM", msg, kind="trimble_down", tag="trimble-down")
     elif st["down"] and st["ok"] >= get_sys("failover_recover_threshold"):
@@ -1462,8 +1493,60 @@ def trimble_health_check():
                       "reason": f"Trimble wieder erreichbar: {trimble['host']}", "detected_at": utcnow().isoformat()})
 
 
+_caster_wd = {"fail": 0}
+CASTER_WATCHDOG_FAILS = 4          # x 15 s ohne Antwort -> Prozess neu starten
+
+
+def caster_responds() -> bool:
+    """Antwortet die Caster-Verwaltung (irgendeine HTTP-Antwort zaehlt, auch 401)? Ungecacht."""
+    try:
+        requests.get(f"{CASTER_URL}/admin", params={"mode": "sources", "nohtml": "1"},
+                     auth=(CASTER_ADMIN_USER, get_setting("caster_admin_pass")), timeout=3)
+        return True
+    except Exception:
+        return False
+
+
+def restart_caster_process() -> bool:
+    """Beendet den haengenden Caster-Prozess hart; Supervisor startet ihn automatisch neu."""
+    killed = False
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            cmd = open(f"/proc/{pid}/cmdline").read().replace("\0", " ")
+        except OSError:
+            continue
+        if "ntripdaemon" in cmd:
+            try:
+                os.kill(int(pid), 9)
+                killed = True
+            except OSError:
+                pass
+    return killed
+
+
+def caster_watchdog():
+    """Der Caster kann sich bei einem Resync aufhaengen (Prozess lebt, antwortet aber nicht mehr, alle Rover
+    getrennt). Antwortet er ~1 Minute lang nicht, wird der Prozess neu gestartet und ein Alarm angelegt."""
+    if caster_responds():
+        _caster_wd["fail"] = 0
+        return
+    _caster_wd["fail"] += 1
+    if _caster_wd["fail"] >= CASTER_WATCHDOG_FAILS:
+        _caster_wd["fail"] = 0
+        if restart_caster_process():
+            msg = "Caster antwortete nicht mehr und wurde automatisch neu gestartet"
+            log_alert_engine(msg)
+            create_system_alert("SYSTEM", msg, kind="caster_restart")
+
+
 def failover_loop():
     while True:
+        try:
+            caster_watchdog()
+        except Exception as e:
+            log_alert_engine(f"Fehler im Caster-Watchdog: {e}")
         try:
             failover_health_check()
         except Exception as e:
@@ -1970,25 +2053,11 @@ def resolve_cached(host: str, ttl: float = 60.0):
     return ip
 
 
-def tcp_ping_ms(host: str, port: int, timeout: float = 2.0):
-    start = time.monotonic()
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            pass
-        return round((time.monotonic() - start) * 1000, 1)
-    except Exception:
-        return None
-
-
 @app.get("/api/connection-info")
 def connection_info(x_admin_token: str | None = Header(default=None)):
     check_token(x_admin_token)
     public_ip = resolve_cached(get_sys("public_hostname"))
     trimble = get_trimble_settings()
-    ports = (trimble["port_legacy"], trimble["port_msm"])
-    with ThreadPoolExecutor(max_workers=2) as pool:      # beide Pings gleichzeitig statt nacheinander
-        trimble_pings = dict(zip(ports, pool.map(lambda p: tcp_ping_ms(trimble["host"], p), ports)))
-
     live = get_live_mountpoints()
     fmap = get_failover_map()
     forced = set(get_forced_primaries())
@@ -2006,7 +2075,8 @@ def connection_info(x_admin_token: str | None = Header(default=None)):
                 "serving": serving[1:] if serving else None,
                 "backups": [b[1:] for b in backups]}
 
-    details = [entry("RTCM", "Trimble, Legacy (RTCM 3.1)"), entry("RTCM32", "Trimble, MSM (RTCM 3.2)")]
+    details = ([entry("RTCM", "Trimble, Legacy (RTCM 3.1)")] if get_sys("trimble_legacy") else []) \
+        + [entry("RTCM32", "Trimble, MSM (RTCM 3.2)")]
     for s in get_all_regional_stations():
         if s["enabled"] and s["key"] not in pure:
             details.append(entry(s["key"], s["name"]))
@@ -2021,7 +2091,7 @@ def connection_info(x_admin_token: str | None = Header(default=None)):
         "mountpoints": mountpoints,
         "mountpoint_details": details,
         "trimble_host": trimble["host"],
-        "trimble_pings_ms": trimble_pings,
+        "trimble_relay": {d["name"]: d["live"] for d in details if d["name"] in ("RTCM", "RTCM32")},
     }
 
 
