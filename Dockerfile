@@ -22,7 +22,7 @@ RUN ./configure --disable-systemd \
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libssl3 libreadline8 ca-certificates supervisor \
+    libssl3 libreadline8 ca-certificates supervisor iproute2 \
  && rm -rf /var/lib/apt/lists/*
 
 # Caster

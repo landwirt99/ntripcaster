@@ -22,6 +22,8 @@ import os
 import re
 import hmac
 import base64
+import struct
+import subprocess
 import math
 import socket
 import time
@@ -376,6 +378,7 @@ SYSTEM_DEFAULTS = {
     "retention_days": 365,
     "sourcetable_mode": "v1",
     "station_coverage_km": 30.0,
+    "trimble_ping_s": 30,      # ICMP-Ping zur Trimble: 1 Paket alle n Sekunden, 0 = aus
     "trimble_legacy": 1,       # 1 = Legacy-Strom /RTCM (RTCM 3.1) von der Trimble holen, 0 = nur /RTCM32
 }
 
@@ -409,6 +412,7 @@ class SystemSettingsIn(BaseModel):
     sourcetable_mode: str | None = None
     station_coverage_km: float | None = None
     trimble_legacy: int | None = None
+    trimble_ping_s: int | None = None
 
     @field_validator("public_hostname")
     @classmethod
@@ -432,7 +436,7 @@ SYSTEM_RANGES = {
     "near_recheck_s": (5, 3600), "near_min_dwell_s": (0, 86400), "near_hysteresis_km": (0, 1000),
     "failback_stable_s": (5, 3600), "failover_fail_threshold": (1, 20),
     "failover_recover_threshold": (1, 20), "retention_days": (7, 3650),
-    "station_coverage_km": (1, 500), "trimble_legacy": (0, 1),
+    "station_coverage_km": (1, 500), "trimble_legacy": (0, 1), "trimble_ping_s": (0, 3600),
 }
 
 
@@ -2053,6 +2057,95 @@ def resolve_cached(host: str, ttl: float = 60.0):
     return ip
 
 
+def _icmp_checksum(data: bytes) -> int:
+    if len(data) % 2:
+        data += b"\0"
+    s = sum(struct.unpack("!%dH" % (len(data) // 2), data))
+    s = (s >> 16) + (s & 0xFFFF)
+    s += s >> 16
+    return ~s & 0xFFFF
+
+
+def icmp_ping_ms(ip: str, timeout: float = 1.5):
+    """Ein einzelnes ICMP-Echo (kein TCP, belegt keinen Verbindungsplatz der Basis)."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+    except OSError:
+        return None
+    try:
+        sock.settimeout(timeout)
+        ident, seq, payload = os.getpid() & 0xFFFF, 1, b"ntrip-ping"
+        head = struct.pack("!BBHHH", 8, 0, 0, ident, seq)
+        packet = struct.pack("!BBHHH", 8, 0, _icmp_checksum(head + payload), ident, seq) + payload
+        start = time.monotonic()
+        sock.sendto(packet, (ip, 0))
+        while True:
+            data, _ = sock.recvfrom(1024)
+            icmp = data[(data[0] & 0x0F) * 4:]
+            if len(icmp) >= 8 and icmp[0] == 0 and struct.unpack("!H", icmp[4:6])[0] == ident:
+                return round((time.monotonic() - start) * 1000, 1)
+            if time.monotonic() - start > timeout:
+                return None
+    except OSError:
+        return None
+    finally:
+        sock.close()
+
+
+_ping_cache = {"ts": 0.0, "ms": None}
+_link_prev: dict = {}
+
+
+def trimble_link_info(host: str, ports: dict):
+    """Zustand der Trimble-Verbindungen OHNE eigene Verbindungen zu ihr:
+    - aus den bestehenden Relay-Sockets des Casters (Kernel-Daten ueber `ss`): verbunden?, RTT beim
+      Verbindungsaufbau, Alter des letzten Pakets, Datenrate. Die laufende RTT ist passiv nicht messbar,
+      weil der Caster auf diesen Verbindungen nur empfaengt (der Kernel misst RTT nur an eigenen Daten).
+    - Ping: ein einzelnes ICMP-Paket alle `trimble_ping_s` Sekunden (0 = aus)."""
+    ip = resolve_cached(host) or host
+    streams = {name: {"connected": False} for name in ports}
+    try:
+        out = subprocess.run(["ss", "-tin", "dst", ip], capture_output=True, text=True, timeout=3).stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        out = []
+    now = time.monotonic()
+    for i, line in enumerate(out):
+        if not line.startswith("ESTAB") or i + 1 >= len(out):
+            continue
+        peer = line.split()[-1]
+        try:
+            port = int(peer.rsplit(":", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        name = next((n for n, p in ports.items() if p == port), None)
+        if not name:
+            continue
+        det = out[i + 1]
+        info = {"connected": True}
+        for key, field in (("rtt_connect_ms", "rtt:"), ("last_rx_ms", "lastrcv:"), ("rx_bytes", "bytes_received:")):
+            pos = det.find(field)
+            if pos >= 0:
+                token = det[pos + len(field):].split()[0].split("/")[0]
+                try:
+                    info[key] = float(token) if key == "rtt_connect_ms" else int(token)
+                except ValueError:
+                    pass
+        if "rx_bytes" in info:
+            prev = _link_prev.get(name)
+            if prev is None or info["rx_bytes"] < prev["bytes"]:      # neu verbunden -> Zaehler neu beginnen
+                prev = _link_prev[name] = {"ts": now, "bytes": info["rx_bytes"], "rate": None}
+            elif now - prev["ts"] >= 5:
+                prev["rate"] = round((info["rx_bytes"] - prev["bytes"]) / 1024 / (now - prev["ts"]), 2)
+                prev.update(ts=now, bytes=info["rx_bytes"])
+            if prev["rate"] is not None:
+                info["kb_s"] = prev["rate"]
+        streams[name] = info
+    interval = get_sys("trimble_ping_s")
+    if interval and now - _ping_cache["ts"] >= interval:
+        _ping_cache.update(ts=now, ms=icmp_ping_ms(ip))
+    return {"ping_ms": _ping_cache["ms"] if interval else None, "ping_enabled": bool(interval), "streams": streams}
+
+
 @app.get("/api/connection-info")
 def connection_info(x_admin_token: str | None = Header(default=None)):
     check_token(x_admin_token)
@@ -2091,6 +2184,10 @@ def connection_info(x_admin_token: str | None = Header(default=None)):
         "mountpoints": mountpoints,
         "mountpoint_details": details,
         "trimble_host": trimble["host"],
+        "trimble_link": trimble_link_info(
+            trimble["host"],
+            {n: p for n, p in (("RTCM", trimble["port_legacy"]), ("RTCM32", trimble["port_msm"]))
+             if n == "RTCM32" or get_sys("trimble_legacy")}),
         "trimble_relay": {d["name"]: d["live"] for d in details if d["name"] in ("RTCM", "RTCM32")},
     }
 

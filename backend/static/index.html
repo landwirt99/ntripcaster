@@ -101,7 +101,7 @@
               <tr><td>Server</td><td id="ciServer">-</td></tr>
               <tr><td>Mountpoint</td><td id="ciMountpoints">-</td></tr>
               <tr><td>Port</td><td id="ciPort">-</td></tr>
-              <tr><td>Trimble-Relay</td><td id="ciPing">-</td></tr>
+              <tr><td>Trimble-Verbindung</td><td id="ciPing">-</td></tr>
             </tbody>
           </table>
           <p class="msg">
@@ -327,6 +327,7 @@
       </div>
       <div class="row">
         <label>Positionsverlauf aufbewahren (Tage): <input id="sysRetention" type="number" style="width:6rem"></label>
+        <label>Ping zur Trimble alle (s, 0 = aus): <input id="sysPingS" type="number" min="0" max="3600" style="width:6rem"></label>
       </div>
       <div class="row">
         <strong style="width:100%">Belastung der Basisstation</strong>
@@ -335,7 +336,9 @@
       </div>
       <p class="msg">Die Trimble wird nur vom Caster angesprochen: eine Dauerverbindung je Strom, egal wie viele Rover
       angeschlossen sind. Erreichbarkeit/Datenfluss wird aus diesen Verbindungen abgelesen, es gibt keine eigenen
-      Verbindungstests zur Basis. Ping/Test-Verbindungen finden nicht statt.</p>
+      Verbindungstests zur Basis. Angezeigt werden: Zustand, Alter der letzten Daten, Datenrate und die RTT beim
+      Verbindungsaufbau (aus den bestehenden Verbindungen, passiv) sowie ein einzelnes ICMP-Ping-Paket im
+      eingestellten Intervall (kein TCP, belegt keinen Verbindungsplatz).</p>
       <div class="row">
         <button onclick="saveSystemSettings()">Speichern</button>
       </div>
@@ -722,6 +725,7 @@ async function loadSystemSettings() {
   document.getElementById("sysFailback").value = s.failback_stable_s;
   document.getElementById("sysRetention").value = s.retention_days;
   document.getElementById("sysCoverage").value = s.station_coverage_km;
+  document.getElementById("sysPingS").value = s.trimble_ping_s;
   document.getElementById("sysTrimbleLegacy").checked = !!s.trimble_legacy;
 }
 
@@ -739,6 +743,7 @@ async function saveSystemSettings() {
     failback_stable_s: num("sysFailback"),
     retention_days: parseInt(document.getElementById("sysRetention").value),
     station_coverage_km: num("sysCoverage"),
+    trimble_ping_s: parseInt(document.getElementById("sysPingS").value),
     trimble_legacy: document.getElementById("sysTrimbleLegacy").checked ? 1 : 0,
   };
   const r = await fetch("/api/system-settings", { method: "POST", headers: headers(), body: JSON.stringify(body) });
@@ -1146,9 +1151,19 @@ async function loadConnectionInfo() {
     if (d.backups && d.backups.length) txt += ` <span class="msg">(Backup: ${esc(d.backups.join(", "))})</span>`;
     return `<div>${dot}${txt}</div>`;
   }).join("") || "-";
+  const link = info.trimble_link || {};
   const relay = info.trimble_relay || {};
-  document.getElementById("ciPing").innerText = Object.entries(relay)
-    .map(([name, live]) => `${name}: ${live === null ? "?" : (live ? "verbunden" : "nicht verbunden")}`).join(" / ") || "-";
+  const pingTxt = !link.ping_enabled ? "Ping aus" : (link.ping_ms != null ? `Ping ${link.ping_ms} ms` : "Ping: keine Antwort");
+  const lines = Object.entries(link.streams || {}).map(([name, s]) => {
+    const live = relay[name];
+    if (!s.connected) return `<div>${esc(name)}: ${live === false ? "nicht verbunden" : "Verbindung nicht erkennbar"}</div>`;
+    const parts = ["verbunden"];
+    if (s.last_rx_ms != null) parts.push(`letzte Daten vor ${(s.last_rx_ms / 1000).toFixed(1)} s`);
+    if (s.kb_s != null) parts.push(`${s.kb_s} KB/s`);
+    if (s.rtt_connect_ms != null) parts.push(`RTT beim Aufbau ${s.rtt_connect_ms} ms`);
+    return `<div>${esc(name)}: ${parts.join(" &middot; ")}</div>`;
+  });
+  document.getElementById("ciPing").innerHTML = `<div><strong>${pingTxt}</strong></div>` + lines.join("");
 }
 
 // --- S7: Mehrfachnutzungs-Alarm ------------------------------------------
