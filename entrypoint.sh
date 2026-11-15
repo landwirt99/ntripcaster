@@ -14,6 +14,7 @@ sys.path.insert(0, '/app')
 import app
 app.init_db()
 app.generate_aut_files()
+app.sync_caster_conf()
 print('Auth-Dateien initialisiert.')
 "
 

@@ -378,6 +378,7 @@ SYSTEM_DEFAULTS = {
     "retention_days": 365,
     "sourcetable_mode": "v1",
     "station_coverage_km": 30.0,
+    "relay_reconnect_s": 20,   # Caster: Wartezeit bis zum erneuten Verbindungsversuch eines abgerissenen Relays
     "trimble_ping_s": 30,      # ICMP-Ping zur Trimble: 1 Paket alle n Sekunden, 0 = aus
     "trimble_legacy": 1,       # 1 = Legacy-Strom /RTCM (RTCM 3.1) von der Trimble holen, 0 = nur /RTCM32
 }
@@ -413,6 +414,7 @@ class SystemSettingsIn(BaseModel):
     station_coverage_km: float | None = None
     trimble_legacy: int | None = None
     trimble_ping_s: int | None = None
+    relay_reconnect_s: int | None = None
 
     @field_validator("public_hostname")
     @classmethod
@@ -436,7 +438,7 @@ SYSTEM_RANGES = {
     "near_recheck_s": (5, 3600), "near_min_dwell_s": (0, 86400), "near_hysteresis_km": (0, 1000),
     "failback_stable_s": (5, 3600), "failover_fail_threshold": (1, 20),
     "failover_recover_threshold": (1, 20), "retention_days": (7, 3650),
-    "station_coverage_km": (1, 500), "trimble_legacy": (0, 1), "trimble_ping_s": (0, 3600),
+    "station_coverage_km": (1, 500), "trimble_legacy": (0, 1), "trimble_ping_s": (0, 3600), "relay_reconnect_s": (5, 600),
 }
 
 
@@ -457,10 +459,11 @@ def get_system_settings_api(x_admin_token: str | None = Header(default=None)):
 def update_system_settings(body: SystemSettingsIn, x_admin_token: str | None = Header(default=None)):
     check_token(x_admin_token)
     _sys_ranges_ok(body)
-    legacy_before = get_sys("trimble_legacy")
+    before = (get_sys("trimble_legacy"), get_sys("relay_reconnect_s"))
     for k, v in body.model_dump(exclude_none=True).items():
         set_setting("sys_" + k, str(v))
-    resync = write_relay_config() if get_sys("trimble_legacy") != legacy_before else None   # Relay-Zeilen aendern sich
+    # Relay-Zeilen bzw. Caster-Konfiguration aendern sich -> neu schreiben + Resync
+    resync = write_relay_config() if (get_sys("trimble_legacy"), get_sys("relay_reconnect_s")) != before else None
     return {"ok": True, "settings": get_all_sys(), "resync_status": resync}
 
 
@@ -1282,6 +1285,38 @@ def sync_sourcetable():
         log_alert_engine("sourcetable.dat mit den Stationen abgeglichen")
 
 
+def set_conf_directive(name: str, value: str) -> bool:
+    """Setzt eine einzeilige Direktive in ntripcaster.conf. True, wenn sich die Datei geaendert hat."""
+    with open(CONF_PATH) as f:
+        lines = f.readlines()
+    wanted = f"{name} {value}\n"
+    out, found = [], False
+    for line in lines:
+        t = line.strip()
+        if t and not t.startswith("#") and t.split(None, 1)[0] == name:
+            if not found:
+                out.append(wanted)
+                found = True
+            continue
+        out.append(line)
+    if not found:
+        if out and not out[-1].endswith("\n"):
+            out[-1] += "\n"
+        out.append(wanted)
+    if out == lines:
+        return False
+    with open(CONF_PATH, "w") as f:
+        f.writelines(out)
+    return True
+
+
+def sync_caster_conf() -> bool:
+    """Gleicht Caster-Einstellungen aus den Systemeinstellungen mit ntripcaster.conf ab. Der Caster liest
+    die Datei nur beim Start/Resync; der Standard (60 s, Pruefung alle 30 s) bedeutet nach einem Abriss
+    der Trimble-Verbindung bis zu 90 s ohne Datenstrom."""
+    return set_conf_directive("relay_reconnect_time", str(get_sys("relay_reconnect_s")))
+
+
 def write_relay_config():
     """Schreibt die 'relay pull'-Zeilen in ntripcaster.conf um:
     - Primaerquelle Trimble/GNSS-Basis (/RTCM, /RTCM32)
@@ -1322,6 +1357,7 @@ def write_relay_config():
     with open(CONF_PATH, "w") as f:
         f.writelines(new_lines)
 
+    sync_caster_conf()
     sync_sourcetable()
     return caster_resync()
 
@@ -1437,13 +1473,14 @@ def failover_health_check():
             why = "manuell abgeschaltet" if primary in forced else "ausgefallen"
             msg = f"Failover aktiv: {primary} {why}, " + (f"{target} uebernimmt" if target else "KEIN Backup verfuegbar")
             log_alert_engine(msg)
-            create_system_alert("SYSTEM", msg)
+            create_system_alert("SYSTEM", msg, tag=f"failover-{primary}")
         elif st["active"] and st["up"] >= get_sys("failover_recover_threshold"):
             st["active"] = False
             _failover_state["last_switch"] = utcnow().isoformat()
             msg = f"Failover beendet: {primary} wieder verfuegbar"
             log_alert_engine(msg)
-            create_system_alert("SYSTEM", msg)
+            resolve_alerts_by_tag(f"failover-{primary}")      # der Alarm "Failover aktiv" endet automatisch
+            notify_alert({"type": "failover_end", "username": "SYSTEM", "reason": msg, "detected_at": utcnow().isoformat()})
 
         mappings.append({
             "primary": primary, "backups": backups, "primary_live": primary in live,
