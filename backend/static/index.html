@@ -202,6 +202,7 @@
       </div>
       <div class="row">
         <button class="secondary" onclick="testFailoverCredentials()">Zugangsdaten testen</button>
+        <button onclick="saveCaster()">Caster speichern</button>
       </div>
       <div class="msg" id="failoverMsg"></div>
 
@@ -1228,7 +1229,7 @@ async function loadCasters() {
   const tbody = document.querySelector("#castersTable tbody");
   tbody.innerHTML = "";
   if (!casters.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="badge-offline">Noch keine Stationen hinzugefuegt</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="badge-offline">Noch kein Caster gespeichert -- oben Host/Zugangsdaten eintragen und "Caster speichern"</td></tr>';
     return;
   }
   casters.forEach((c, idx) => {
@@ -1241,13 +1242,37 @@ async function loadCasters() {
       <td><input id="${portId}" type="number" value="${c.port}" style="width:6rem"></td>
       <td><input id="${userId}" type="text" value="${esc(c.user)}" style="width:10rem"></td>
       <td><input id="${passId}" type="password" value="${esc(c.pass)}" style="width:10rem"></td>
-      <td>${c.station_count} (${esc(c.stations.join(", "))})</td>
+      <td>${c.station_count ? c.station_count + " (" + esc(c.stations.join(", ")) + ")" : "keine"}</td>
       <td>
+        ${c.station_count ? "" : `<button class="danger" onclick="deleteCaster('${esc(c.host)}')">Entfernen</button>`}
         <button class="secondary" onclick="testCasterCredentials('${esc(c.host)}', '${portId}', '${userId}', '${passId}')">Testen</button>
         <button onclick="applyCasterCredentials('${esc(c.host)}', '${portId}', '${userId}', '${passId}')">Uebernehmen</button>
       </td>`;
     tbody.appendChild(tr);
   });
+}
+
+async function saveCaster() {
+  const msg = document.getElementById("failoverMsg");
+  const body = {
+    host: document.getElementById("foHost").value.trim(),
+    port: parseInt(document.getElementById("foPort").value),
+    user: document.getElementById("foUser").value,
+    password: document.getElementById("foPass").value,
+  };
+  if (!body.host || !body.port) { msg.innerText = "Host und Port angeben."; return; }
+  const r = await fetch("/api/casters", { method: "POST", headers: headers(), body: JSON.stringify(body) });
+  const res = await r.json();
+  msg.innerText = r.ok ? "Caster gespeichert." : ("Fehler: " + (res.detail || r.status));
+  loadCasters();
+}
+
+async function deleteCaster(host) {
+  if (!confirm("Caster '" + host + "' aus der Liste entfernen?")) return;
+  const r = await fetch("/api/casters/" + encodeURIComponent(host), { method: "DELETE", headers: headers() });
+  const res = await r.json();
+  document.getElementById("castersMsg").innerText = r.ok ? "Entfernt." : ("Fehler: " + (res.detail || r.status));
+  loadCasters();
 }
 
 async function testCasterCredentials(host, portId, userId, passId) {
@@ -1277,7 +1302,8 @@ async function applyCasterCredentials(host, portId, userId, passId) {
     method: "POST", headers: headers(), body: JSON.stringify(body),
   });
   const res = await r.json();
-  document.getElementById("castersMsg").innerText = res.ok ? "Uebernommen und Resync ausgefuehrt." : "Fehler.";
+  document.getElementById("castersMsg").innerText = res.ok
+    ? (res.resync_status ? "Uebernommen und Resync ausgefuehrt." : "Gespeichert.") : "Fehler.";
   loadRegionalStations();
   loadCasters();
 }

@@ -327,6 +327,31 @@ def init_db():
     conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('alert_distance_m', '300')")
     conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('alert_auto_kick', 'false')")
     conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('alert_webhook_url', '')")
+    # Caster-Verzeichnis: Zugangsdaten bleiben erhalten, auch wenn keine Station des Casters
+    # (mehr) als Mountpoint angelegt ist.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS casters (
+            host TEXT PRIMARY KEY,
+            port INTEGER NOT NULL,
+            user TEXT NOT NULL DEFAULT '',
+            pass TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO casters (host, port, user, pass) "
+        "SELECT caster_host, COALESCE(caster_port, 2101), COALESCE(caster_user, ''), COALESCE(caster_pass, '') "
+        "FROM regional_stations WHERE caster_host IS NOT NULL GROUP BY caster_host"
+    )
+    eu = {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings WHERE key LIKE 'eurefip_%'").fetchall()}
+    if eu.get("eurefip_host"):      # zuletzt in der GUI eingetragener Caster
+        try:
+            eu_port = int(eu.get("eurefip_port") or 2101)
+        except ValueError:
+            eu_port = 2101
+        conn.execute("INSERT OR IGNORE INTO casters (host, port, user, pass) VALUES (?,?,?,?)",
+                     (eu["eurefip_host"], eu_port, eu.get("eurefip_user", ""), eu.get("eurefip_pass", "")))
     conn.commit()
     conn.close()
 
@@ -1500,27 +1525,34 @@ def test_failover_credentials(x_admin_token: str | None = Header(default=None)):
     )
 
 
+def upsert_caster(conn, host: str, port: int, user: str, password: str):
+    conn.execute(
+        "INSERT INTO casters (host, port, user, pass) VALUES (?,?,?,?) "
+        "ON CONFLICT(host) DO UPDATE SET port=excluded.port, user=excluded.user, pass=excluded.pass",
+        (host, port, user or "", password or ""),
+    )
+
+
 @app.get("/api/casters")
 def list_casters(x_admin_token: str | None = Header(default=None)):
-    """Gruppiert alle konfigurierten Regional-Stationen nach Quell-Caster
-    (Host), damit man Zugangsdaten EINMAL pro Caster aendern kann, statt pro
-    einzelner Station."""
+    """Alle gespeicherten Caster (auch ohne Station) mit den Stationen, die sie nutzen -- damit
+    man Zugangsdaten EINMAL pro Caster aendern kann, statt pro einzelner Station."""
     check_token(x_admin_token)
-    stations = get_all_regional_stations()
-    casters = {}
-    for s in stations:
-        host = s.get("caster_host") or "-"
-        if host not in casters:
-            casters[host] = {
-                "host": host,
-                "port": s.get("caster_port"),
-                "user": s.get("caster_user") or "",
-                "pass": s.get("caster_pass") or "",
-                "station_count": 0,
-                "stations": [],
-            }
-        casters[host]["station_count"] += 1
-        casters[host]["stations"].append(s["key"])
+    conn = db()
+    try:
+        rows = conn.execute("SELECT host, port, user, pass FROM casters ORDER BY host").fetchall()
+    finally:
+        conn.close()
+    casters = {r["host"]: {"host": r["host"], "port": r["port"], "user": r["user"], "pass": r["pass"],
+                           "station_count": 0, "stations": []} for r in rows}
+    for s in get_all_regional_stations():
+        host = s.get("caster_host")
+        if not host:
+            continue
+        c = casters.setdefault(host, {"host": host, "port": s.get("caster_port"), "user": s.get("caster_user") or "",
+                                      "pass": s.get("caster_pass") or "", "station_count": 0, "stations": []})
+        c["station_count"] += 1
+        c["stations"].append(s["key"])
     return list(casters.values())
 
 
@@ -1552,14 +1584,49 @@ def update_caster_credentials(host: str, body: CasterCredentials, x_admin_token:
     nicht jede einzelne Station manuell korrigieren."""
     check_token(x_admin_token)
     conn = db()
-    conn.execute(
-        "UPDATE regional_stations SET caster_port=?, caster_user=?, caster_pass=? WHERE caster_host=?",
-        (body.port, body.user, body.password, host),
-    )
-    conn.commit()
-    conn.close()
-    status = write_relay_config()
+    try:
+        n = conn.execute(
+            "UPDATE regional_stations SET caster_port=?, caster_user=?, caster_pass=? WHERE caster_host=?",
+            (body.port, body.user, body.password, host),
+        ).rowcount
+        upsert_caster(conn, host, body.port, body.user, body.password)
+        conn.commit()
+    finally:
+        conn.close()
+    status = write_relay_config() if n else None     # Resync nur noetig, wenn Stationen betroffen sind
     return {"ok": True, "resync_status": status}
+
+
+class CasterIn(CasterCredentials):
+    host: str
+
+    @field_validator("host")
+    @classmethod
+    def _v_host(cls, v):
+        return _check_host(v)
+
+
+@app.post("/api/casters")
+def save_caster(body: CasterIn, x_admin_token: str | None = Header(default=None)):
+    """Legt einen Caster mit Zugangsdaten an bzw. aktualisiert ihn (auch ohne Mountpoint/Station)."""
+    check_token(x_admin_token)
+    return update_caster_credentials(body.host, body, x_admin_token)
+
+
+@app.delete("/api/casters/{host}")
+def delete_caster(host: str, x_admin_token: str | None = Header(default=None)):
+    """Entfernt einen Caster aus dem Verzeichnis -- nur, wenn keine Station ihn mehr nutzt."""
+    check_token(x_admin_token)
+    conn = db()
+    try:
+        used = conn.execute("SELECT COUNT(*) FROM regional_stations WHERE caster_host=?", (host,)).fetchone()[0]
+        if used:
+            raise HTTPException(status_code=409, detail=f"{used} Station(en) nutzen diesen Caster noch -- erst entfernen")
+        conn.execute("DELETE FROM casters WHERE host=?", (host,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True}
 
 
 @app.post("/api/casters/test")
@@ -1731,6 +1798,8 @@ def add_regional_station(body: RegionalStationAdd, x_admin_token: str | None = H
          1 if (body.enabled or backup_for) else 0, backup_for,
          caster_host, caster_port, caster_user, caster_pass),
     )
+    if caster_host:
+        upsert_caster(conn, caster_host, caster_port or 2101, caster_user, caster_pass)
     conn.commit()
     conn.close()
     status = write_relay_config()
