@@ -1,0 +1,1489 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>NTRIP Admin</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; margin: 0; background:#0f172a; color:#e2e8f0; }
+  h1 { font-size: 1.2rem; margin: 0 0 1rem 0; }
+  h2 { font-size: 1.05rem; margin-top: 0; border-bottom: 1px solid #334155; padding-bottom: .4rem; }
+  table { width: 100%; border-collapse: collapse; margin-top: .5rem; }
+  th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #334155; font-size: .9rem; white-space: nowrap; }
+  th { color: #94a3b8; }
+  th[data-sort] { cursor: pointer; user-select: none; }
+  th[data-sort]:hover { color: #e2e8f0; }
+  th[data-sort].sort-asc::after { content: " \25B2"; font-size: .7em; }
+  th[data-sort].sort-desc::after { content: " \25BC"; font-size: .7em; }
+  input, select, button { font-size: .9rem; padding: .4rem .6rem; border-radius: 6px; border: 1px solid #334155; background:#1e293b; color:#e2e8f0; }
+  button { cursor: pointer; background:#2563eb; border: none; }
+  button.secondary { background:#334155; }
+  button.danger { background:#dc2626; }
+  .row { display:flex; gap:.5rem; flex-wrap: wrap; align-items:center; margin-bottom:.5rem; }
+  .badge-online { color:#22c55e; font-weight:600; }
+  .badge-offline { color:#64748b; }
+  .badge-active { color:#22c55e; }
+  .badge-inactive { color:#f87171; }
+  .msg { font-size:.85rem; color:#94a3b8; min-height:1.2em; }
+  #map { height: 70vh; border-radius: 8px; }
+
+  #login { max-width: 320px; margin: 4rem auto; text-align:center; }
+
+  #app { display:none; }
+  .layout { display:flex; min-height:100vh; }
+  nav { width: 200px; flex-shrink:0; background:#111827; padding:1rem .5rem; border-right:1px solid #334155; }
+  nav button { display:block; width:100%; text-align:left; background:transparent; color:#cbd5e1; margin-bottom:.3rem; border:none; padding:.6rem .7rem; border-radius:6px; }
+  nav button:hover { background:#1e293b; }
+  nav button.active { background:#2563eb; color:white; }
+  main { flex:1; padding: 1.2rem 1.5rem; max-width: 1600px; }
+  .page { display:none; }
+  .page.active { display:block; }
+  .split { display:flex; gap:2rem; align-items:flex-start; }
+  .split-left { flex: 0 0 auto; }
+  .split-right { flex: 0 0 480px; width: 480px; position: sticky; top: 1rem; }
+  #map { height: 420px; }
+  #historyMap { height: 420px; border-radius: 8px; }
+  @media (max-width: 1100px) {
+    .split { flex-direction: column; }
+    .split-right { position: static; width: 100%; }
+    #map { height: 50vh; }
+  }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <h1>NTRIP Admin Login</h1>
+  <input id="tokenInput" type="password" placeholder="Admin-Token" style="width:100%;margin-bottom:.5rem;">
+  <button onclick="login()" style="width:100%;">Einloggen</button>
+  <div class="msg" id="loginMsg"></div>
+</div>
+
+<div id="app">
+<div class="layout">
+  <nav>
+    <h1>NTRIP Admin</h1>
+    <button class="navbtn active" data-page="page-status" onclick="showPage('page-status')">Status</button>
+    <button class="navbtn" data-page="page-history" onclick="showPage('page-history')">Verlauf</button>
+    <button class="navbtn" data-page="page-stations" onclick="showPage('page-stations')">Stationen</button>
+    <button class="navbtn" data-page="page-settings" onclick="showPage('page-settings')">Einstellungen</button>
+  </nav>
+  <main>
+
+    <div id="page-status" class="page active">
+      <div class="split">
+        <div class="split-left">
+          <div id="alertBanner" style="display:none; background:#7f1d1d; border:1px solid #dc2626; border-radius:8px; padding:.7rem 1rem; margin-bottom:1rem;"></div>
+
+          <h2>Alarme</h2>
+          <table id="alertsTable">
+            <thead><tr><th data-sort="text">Zeit</th><th data-sort="text">Nutzer</th><th data-sort="text">Grund</th><th data-sort="text">Status</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+
+          <h2 style="margin-top:2rem">Verbindungsdaten fuer Rover</h2>
+          <table id="connectionInfoTable">
+            <tbody>
+              <tr><td>Server</td><td id="ciServer">-</td></tr>
+              <tr><td>Mountpoint</td><td id="ciMountpoints">-</td></tr>
+              <tr><td>Port</td><td id="ciPort">-</td></tr>
+              <tr><td>Ping Trimble (28001 / 28002)</td><td id="ciPing">-</td></tr>
+            </tbody>
+          </table>
+          <p class="msg">
+            Die Liste zeigt live, welche Mountpoints erreichbar sind und wer bei einem Ausfall
+            uebernimmt (Backups legst du im Reiter "Stationen" fest). Stationen und Backups
+            erscheinen hier automatisch, sobald du sie dort anlegst oder umbenennst.
+            Reine Backup-Stationen sind fuer Rover unsichtbar.
+          </p>
+
+          <h2 style="margin-top:2rem">Stationen</h2>
+          <table id="stationsTable">
+            <thead><tr><th data-sort="text">Mountpoint</th><th data-sort="text">Status</th><th data-sort="num">Clients</th><th data-sort="text">Verbunden seit</th><th data-sort="num">KByte gelesen</th></tr></thead>
+            <tbody></tbody>
+          </table>
+
+          <h2 style="margin-top:2rem">Status (Live)</h2>
+          <table id="machineStatusTable">
+            <thead><tr><th data-sort="text">Maschine</th><th data-sort="text">Status</th><th data-sort="text">Mountpoint</th><th data-sort="text">Online seit / zuletzt gesehen</th><th data-sort="text">Position</th><th data-sort="num">Satelliten</th><th data-sort="text">Qualitaet</th><th data-sort="num">Distanz zur Basis</th></tr></thead>
+            <tbody></tbody>
+          </table>
+
+          <h2 style="margin-top:2rem">Benutzer / Maschinen</h2>
+          <table id="usersTable">
+            <thead><tr><th data-sort="text">Username</th><th>Passwort</th><th data-sort="text">Status</th><th data-sort="num">Max. Verbindungen</th><th data-sort="text">Gueltig bis</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+
+          <h2 style="margin-top:2rem">Neuen Nutzer anlegen</h2>
+          <div class="row">
+            <input id="newUsername" placeholder="Username (z.B. traktor1)">
+            <input id="newPassword" placeholder="Passwort" type="text">
+            <input id="newMaxConn" placeholder="Max. Verbindungen" type="number" value="1" style="width:6rem">
+            <input id="newValidUntil" placeholder="Gueltig bis (YYYY-MM-DD)" type="text" style="width:12rem">
+            <button onclick="createUser()">Anlegen</button>
+          </div>
+          <div class="msg" id="createMsg"></div>
+        </div>
+
+        <div class="split-right">
+          <h2>Karte</h2>
+          <div class="row">
+            <label>Hintergrund:
+              <select id="tileSelect" onchange="switchTileLayer()">
+                <option value="hybrid">Hybrid (Satellit + Beschriftung)</option>
+                <option value="osm">OpenStreetMap</option>
+                <option value="topo">OpenTopoMap</option>
+                <option value="satellite">Satellit (ohne Beschriftung)</option>
+              </select>
+            </label>
+            <label><input type="checkbox" id="showTrackOnMap" checked onchange="updateMap()"> Spur (24h)</label>
+            <button class="secondary" onclick="centerMap()">Zentrieren</button>
+          </div>
+          <div id="map"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="page-history" class="page">
+      <h2>Positions-Verlauf</h2>
+      <div class="row">
+        <label>Maschine:
+          <select id="historyUserSelect" onchange="loadHistory()"></select>
+        </label>
+        <label>Zeitraum:
+          <select id="historyRangeSelect" onchange="onHistoryRangeChange()">
+            <option value="1">Letzte Stunde</option>
+            <option value="6">Letzte 6 Stunden</option>
+            <option value="24" selected>Letzte 24 Stunden</option>
+            <option value="168">Letzte 7 Tage</option>
+          </select>
+        </label>
+        <label>oder bestimmtes Datum:
+          <input type="date" id="historyDateInput" onchange="loadHistory()">
+          <button class="secondary" onclick="clearHistoryDate()">X</button>
+        </label>
+      </div>
+      <div class="split">
+        <div class="split-left" style="flex:0 0 480px; width:480px;">
+          <table id="historyTable">
+            <thead><tr><th data-sort="text">Zeit (UTC)</th><th data-sort="text">Position</th><th data-sort="num">Satelliten</th><th data-sort="num">Qualitaet</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="split-right">
+          <div id="historyMap"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="page-stations" class="page">
+      <h2>Stationen</h2>
+
+      <div class="row">
+        <strong>Aktuelle Trimble-Quelle:</strong>
+        <span id="failoverStatusText">-</span>
+      </div>
+
+      <h2 style="margin-top:1.5rem">NTRIP-Caster-Zugangsdaten</h2>
+      <p class="msg">Fuer zusaetzliche Stationen von einem beliebigen NTRIP-Caster (z.B. EUREF-IP,
+      IGS-IP, RTK2go.com, ...). Bei offenen Castern wie RTK2go kann Benutzername/Passwort leer bleiben.</p>
+      <div class="row">
+        <label>Host: <input id="foHost" type="text" style="width:14rem" placeholder="z.B. euref-ip.net oder rtk2go.com"></label>
+        <label>Port: <input id="foPort" type="number" style="width:6rem" value="2101"></label>
+      </div>
+      <div class="row">
+        <label>Benutzername: <input id="foUser" type="text" style="width:12rem"></label>
+        <label>Passwort: <input id="foPass" type="password" style="width:12rem"></label>
+      </div>
+      <div class="row">
+        <button class="secondary" onclick="testFailoverCredentials()">Zugangsdaten testen</button>
+      </div>
+      <div class="msg" id="failoverMsg"></div>
+
+      <h2 style="margin-top:1.5rem">Caster verwalten</h2>
+      <p class="msg">Alle Caster, von denen du bereits Stationen hinzugefuegt hast. Zugangsdaten hier
+      aendern korrigiert sie fuer ALLE Stationen dieses Casters auf einmal.</p>
+      <table id="castersTable">
+        <thead><tr><th>Host</th><th>Port</th><th>Benutzername</th><th>Passwort</th><th>Stationen</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="msg" id="castersMsg"></div>
+
+      <h2 style="margin-top:1.5rem">Konfigurierte Stationen</h2>
+      <p class="msg">Deine aktuell konfigurierten Regional-Stationen (aktiv als Mountpoint und/oder
+      als Backup fuer die Trimble oder eine andere Station). Ein Backup wird nur genutzt, solange
+      die Primaerquelle ausgefallen ist.</p>
+      <div class="row">
+        <button class="secondary" onclick="loadRegionalStations()">Aktualisieren</button>
+      </div>
+
+      <table id="regionalStationsTable">
+        <thead><tr><th data-sort="text">Lokaler Mountpoint-Name</th><th data-sort="text">Remote-Mountpoint</th><th data-sort="text">Caster</th><th data-sort="text">Als Mountpoint aktivieren</th><th data-sort="text">Backup fuer</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+
+      <h2 style="margin-top:1.5rem">Verfuegbare Stationen durchsuchen</h2>
+      <p class="msg">Live-Liste aller Stationen vom oben konfigurierten NTRIP-Caster -- waehle frei aus,
+      welche du zusaetzlich als eigenen Mountpoint und/oder als Backup nutzen willst.</p>
+      <div class="row">
+        <input id="euSearch" type="text" placeholder="Suche (Ort, Mountpoint, Land...)" style="width:20rem" onkeydown="if(event.key==='Enter') searchEurefStations()">
+        <button class="secondary" onclick="searchEurefStations()">Suchen</button>
+        <button class="secondary" onclick="searchEurefStations()">Aktualisieren</button>
+      </div>
+      <div class="split">
+        <div class="split-left" style="flex:0 0 820px; width:820px; min-width:0; overflow-x:auto;">
+          <table id="euSourcetableTable" style="min-width:780px;">
+            <thead><tr><th>Mountpoint</th><th>Ort</th><th>Format</th><th>Land</th><th>Position</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="split-right">
+          <div id="euMap" style="height:420px; border-radius:8px;"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="page-settings" class="page">
+      <h2>Einstellungen</h2>
+
+      <h2 style="margin-top:0">Basisstation (Trimble/GNSS-Empfaenger)</h2>
+      <p class="msg">Hier kannst du die Adresse deiner eigenen Basisstation eintragen -- z.B.
+      wenn du dieses System fuer eine andere Trimble/GNSS-Basis nachnutzt. Aenderung
+      schreibt sofort die Relay-Konfiguration neu und loest einen kurzen Resync aus
+      (alle Streams ca. 20-60s unterbrochen).</p>
+      <div class="row">
+        <label>Host/IP: <input id="trimbleHost" type="text" style="width:12rem" placeholder="192.168.0.10"></label>
+        <label>Port Legacy (RTCM3.1): <input id="trimblePortLegacy" type="number" style="width:7rem" placeholder="28001"></label>
+        <label>Port MSM (RTCM3.2): <input id="trimblePortMsm" type="number" style="width:7rem" placeholder="28002"></label>
+        <button onclick="saveTrimbleSettings()">Speichern</button>
+      </div>
+      <div class="msg" id="trimbleSettingsMsg"></div>
+
+      <h2 style="margin-top:2rem">Zugangsdaten &amp; Passwoerter</h2>
+      <p class="msg">Die wichtigsten Passwoerter werden hier gesetzt und wirken sofort.
+      Rover-Benutzer verwaltest du im Reiter "Benutzer", Zugaenge zu fremden Castern (EUREF, RTK2go)
+      im Reiter "Stationen" unter "Caster verwalten".</p>
+      <table id="secTable">
+        <thead><tr><th>Komponente</th><th>Status</th><th>Neues Passwort</th><th></th></tr></thead>
+        <tbody>
+          <tr><td>Web-Oberflaeche (Login-Token)</td><td id="secGui">-</td>
+            <td><input id="newGuiToken" type="password" placeholder="Neues Login-Token" style="width:14rem"></td>
+            <td><button class="secondary" onclick="randomPw('newGuiToken')">Zufall</button>
+                <button onclick="changeGuiToken()">Aendern</button></td></tr>
+          <tr><td>Caster-Admin (/admin-Login, users.aut)</td><td id="secCasterAdmin">-</td>
+            <td><input id="newCasterPass" type="password" placeholder="Neues Passwort" style="width:14rem"></td>
+            <td><button class="secondary" onclick="randomPw('newCasterPass')">Zufall</button>
+                <button onclick="changeCasterPass()">Aendern</button></td></tr>
+        </tbody>
+      </table>
+      <div class="msg" id="guiTokenMsg"></div>
+      <div class="msg" id="casterPassMsg"></div>
+
+      <h2 style="margin-top:2rem">Systemeinstellungen</h2>
+      <p class="msg">Diese Werte gelten sofort bzw. nach spaetestens 60 Sekunden (Proxy).</p>
+      <div class="row">
+        <label>Oeffentlicher Hostname: <input id="sysHost" type="text" style="width:14rem"></label>
+        <label>NTRIP-Port: <input id="sysPort" type="number" style="width:6rem"></label>
+        <label>Sourcetable-Format:
+          <select id="sysSourcetableMode"><option value="v1">NTRIP 1 (SOURCETABLE 200 OK)</option><option value="v2">NTRIP 2 (HTTP/1.1)</option></select></label>
+      </div>
+      <div class="row">
+        <strong style="width:100%">Automatische Stationswahl (/NEAR)</strong>
+        <label>Pruefintervall (s): <input id="sysNearRecheck" type="number" step="1" style="width:6rem"></label>
+        <label>Mindestverweildauer (s): <input id="sysNearDwell" type="number" step="1" style="width:6rem"></label>
+        <label>Wechsel nur, wenn neue Station mindestens (km) naeher am Rover liegt: <input id="sysNearHyst" type="number" step="1" style="width:6rem"></label>
+      </div>
+      <p class="msg">/NEAR schaut alle <em>Pruefintervall</em> Sekunden anhand der GGA-Position des Rovers, welche Station
+      am naechsten liegt. Gewechselt wird nur, wenn die neue Station mindestens so viele <em>km</em> naeher am Rover liegt als
+      die aktuelle (Entfernung Rover &rarr; Station) und der Rover schon <em>Mindestverweildauer</em> Sekunden auf der
+      aktuellen Station ist. Das verhindert staendiges Hin- und Herspringen (und Verlust des RTK-Fix), wenn zwei Stationen
+      fast gleich weit entfernt sind. Beispiel: aktuell 42 km, neue Station 35 km &rarr; Unterschied 7 km, bei Einstellung 10 km
+      bleibt der Rover auf der aktuellen Station. Faellt die aktuelle Station aus, wird sofort gewechselt.</p>
+      <div class="row">
+        <strong style="width:100%">Failover</strong>
+        <label>Ausfall nach Pruefungen: <input id="sysFoFail" type="number" style="width:5rem"></label>
+        <label>Rueckkehr nach Pruefungen: <input id="sysFoRecover" type="number" style="width:5rem"></label>
+        <label>Rover zurueckholen nach (s stabil): <input id="sysFailback" type="number" style="width:6rem"></label>
+      </div>
+      <div class="row">
+        <strong style="width:100%">Karten: Abdeckung der Stationen</strong>
+        <label>Radius der effektiven Abdeckung (km) -- gelber Kreis um jede Station und die Trimble auf den Karten: <input id="sysCoverage" type="number" step="1" min="1" max="500" style="width:6rem"></label>
+      </div>
+      <div class="row">
+        <label>Positionsverlauf aufbewahren (Tage): <input id="sysRetention" type="number" style="width:6rem"></label>
+        <button onclick="saveSystemSettings()">Speichern</button>
+      </div>
+      <div class="msg" id="sysSettingsMsg"></div>
+
+      <h2 style="margin-top:2rem">Manuell umschalten (Trimble-Quelle)</h2>
+      <div class="row">
+        <button class="secondary" onclick="manualFailoverSwitch(false)">Auf Primaerquelle (Trimble)</button>
+        <button class="secondary" onclick="manualFailoverSwitch(true)">Auf Failover-Quelle umschalten</button>
+      </div>
+      <p class="msg">Das Umschalten erfolgt ohne Caster-Neustart: verbundene Rover der Trimble werden
+      kurz getrennt und verbinden sich neu. Welche Station als Backup dient, legst du im Reiter
+      "Stationen" fest (Spalte "Backup fuer").</p>
+      <div class="msg" id="manualSwitchMsg"></div>
+
+      <h2 style="margin-top:2rem">Mehrfachnutzungs-Alarm</h2>
+      <div class="row">
+        <label>Karenzzeit (Sekunden):
+          <input id="alertGrace" type="number" style="width:6rem" value="60">
+        </label>
+        <label>Distanz-Schwelle (Meter):
+          <input id="alertDistance" type="number" style="width:7rem" value="300">
+        </label>
+      </div>
+      <div class="row">
+        <label><input type="checkbox" id="alertAutoKick"> Automatisch kicken + sperren bei Alarm</label>
+      </div>
+      <div class="row">
+        <label style="width:100%">Webhook-URL (optional, POST bei jedem Alarm):
+          <input id="alertWebhook" type="text" style="width:100%" placeholder="https://...">
+        </label>
+      </div>
+      <button onclick="saveAlertSettings()">Speichern</button>
+      <div class="msg" id="alertSettingsMsg"></div>
+    </div>
+
+  </main>
+</div>
+</div>
+
+<script>
+let token = localStorage.getItem("ntrip_admin_token") || "";
+
+// Kurzzeit-Cache: mehrere Teile der Seite brauchen im selben Refresh-Zyklus dieselben Daten
+// (Maschinenstatus, Stationen, Basisposition) -> nur ein Request pro TTL.
+const _jsonCache = new Map();
+function getJson(url, ttl = 5000) {
+  const hit = _jsonCache.get(url);
+  if (hit && Date.now() - hit.t < ttl) return hit.p;
+  const p = fetch(url, { headers: headers() }).then(r => (r.ok ? r.json() : null)).catch(() => null);
+  _jsonCache.set(url, { t: Date.now(), p });
+  return p;
+}
+
+function headers() {
+  return { "Content-Type": "application/json", "X-Admin-Token": token };
+}
+
+function login() {
+  _jsonCache.clear();
+  token = document.getElementById("tokenInput").value;
+  localStorage.setItem("ntrip_admin_token", token);
+  tryShowApp();
+}
+
+async function tryShowApp() {
+  const r = await fetch("/api/users", { headers: headers() });
+  if (r.ok) {
+    document.getElementById("login").style.display = "none";
+    document.getElementById("app").style.display = "block";
+    refreshAll();
+  } else {
+    document.getElementById("loginMsg").innerText = "Falsches Token.";
+  }
+}
+
+function showPage(pageId) {
+  document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
+  document.getElementById(pageId).classList.add("active");
+  document.querySelectorAll(".navbtn").forEach(b => b.classList.toggle("active", b.dataset.page === pageId));
+  if (pageId === "page-status") setTimeout(() => { if (map) map.invalidateSize(); }, 50);
+  if (pageId === "page-status") loadConnectionInfo();
+  if (pageId === "page-history") {
+    loadHistory();
+    setTimeout(() => { if (historyMap) historyMap.invalidateSize(); }, 50);
+  }
+  if (pageId === "page-stations") {
+    loadFailoverSettings();
+    loadFailoverStatus();
+    loadRegionalStations();
+    loadCasters();
+    searchEurefStations();
+  }
+  if (pageId === "page-settings") {
+    loadTrimbleSettings();
+    loadSecurityStatus();
+    loadSystemSettings();
+  }
+}
+
+async function refreshAll() {
+  await loadUsers();
+  await loadStations();
+  await loadMachineStatus();
+  await populateHistoryUserSelect();
+  await updateMap();
+  await loadConnectionInfo();
+  await loadAlerts();
+  await loadAlertSettings();
+  initAllSortableTables();
+}
+
+function timeAgo(isoString) {
+  if (!isoString) return "-";
+  const then = new Date(isoString + "Z");
+  const diffSec = Math.round((Date.now() - then.getTime()) / 1000);
+  if (diffSec < 60) return diffSec + "s";
+  if (diffSec < 3600) return Math.round(diffSec / 60) + "min";
+  if (diffSec < 86400) return Math.round(diffSec / 3600) + "h";
+  return Math.round(diffSec / 86400) + "d";
+}
+
+async function loadMachineStatus() {
+  const rows = (await getJson("/api/machine-status")) || [];
+  const tbody = document.querySelector("#machineStatusTable tbody");
+  tbody.innerHTML = "";
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="badge-offline">Noch keine Positionsdaten (Rover muss GGA senden)</td></tr>';
+    return;
+  }
+  for (const m of rows) {
+    const tr = document.createElement("tr");
+    const statusTxt = m.online ? `<span class="badge-online">&#9679; Online</span> seit ${timeAgo(m.online_since)}`
+                                : `<span class="badge-offline">&#9679; Offline</span> zuletzt vor ${timeAgo(m.last_seen)}`;
+    const pos = (m.last_lat && m.last_lon)
+      ? `<a href="javascript:void(0)" onclick="zoomToMachine('${esc(m.username)}')" style="color:#38bdf8;text-decoration:underline;cursor:pointer;">${m.last_lat.toFixed(5)}, ${m.last_lon.toFixed(5)}</a>`
+      : "-";
+    const dist = (m.last_distance_km != null) ? m.last_distance_km + " km" : "-";
+    const requested = m.last_requested_mountpoint || m.last_mountpoint || "-";
+    const resolved = m.last_mountpoint || "-";
+    const mountpointTxt = (requested !== resolved && requested === "/NEAR")
+      ? `${requested} &#8594; ${resolved}`
+      : resolved;
+    tr.innerHTML = `
+      <td>${esc(m.username)}</td>
+      <td>${m.online ? '<span class="badge-online">Online</span>' : '<span class="badge-offline">Offline</span>'}</td>
+      <td>${mountpointTxt}</td>
+      <td>${statusTxt}</td>
+      <td>${pos}</td>
+      <td>${m.last_sat_count ?? '-'}</td>
+      <td>${m.fix_quality_label}</td>
+      <td>${dist}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+async function loadUsers() {
+  const r = await fetch("/api/users", { headers: headers() });
+  const users = await r.json();
+  const tbody = document.querySelector("#usersTable tbody");
+  tbody.innerHTML = "";
+  for (const u of users) {
+    const tr = document.createElement("tr");
+    const rowId = "pw_" + u.username.replace(/[^a-zA-Z0-9]/g, "_");
+    const validId = "valid_" + u.username.replace(/[^a-zA-Z0-9]/g, "_");
+    tr.innerHTML = `
+      <td>${esc(u.username)}</td>
+      <td>
+        <input id="${rowId}" type="text" value="${esc(u.password)}" style="width:8rem">
+        <button class="secondary" onclick="changeUserPassword('${esc(u.username)}', '${rowId}')">Speichern</button>
+      </td>
+      <td class="${u.active ? 'badge-active' : 'badge-inactive'}">${u.active ? 'Aktiv' : 'Gesperrt'}</td>
+      <td>${u.max_connections}</td>
+      <td>
+        <input id="${validId}" type="date" value="${u.valid_until || ''}" style="width:9rem">
+        <button class="secondary" onclick="changeValidUntil('${esc(u.username)}', '${validId}')">Speichern</button>
+      </td>
+      <td>
+        <button class="secondary" onclick="toggleActive('${esc(u.username)}', ${u.active ? false : true})">${u.active ? 'Sperren' : 'Freigeben'}</button>
+        <button class="danger" onclick="deleteUser('${esc(u.username)}')">Loeschen</button>
+      </td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+async function changeValidUntil(username, inputId) {
+  const newDate = document.getElementById(inputId).value;
+  await fetch("/api/users/" + encodeURIComponent(username), {
+    method: "PATCH",
+    headers: headers(),
+    body: JSON.stringify({ valid_until: newDate || null })
+  });
+  refreshAll();
+}
+
+async function changeUserPassword(username, inputId) {
+  const newPassword = document.getElementById(inputId).value;
+  if (!newPassword) return;
+  await fetch("/api/users/" + encodeURIComponent(username), {
+    method: "PATCH",
+    headers: headers(),
+    body: JSON.stringify({ password: newPassword })
+  });
+  refreshAll();
+}
+
+async function loadStations() {
+  const r = await fetch("/api/stations", { headers: headers() });
+  const data = await r.json();
+  const tbody = document.querySelector("#stationsTable tbody");
+  tbody.innerHTML = "";
+  for (const s of (data.sources || [])) {
+    const tr = document.createElement("tr");
+    if (s.online) {
+      tr.innerHTML = `
+        <td>${esc(s.mountpoint)}</td>
+        <td class="badge-online">Online</td>
+        <td>${s.clients}</td>
+        <td>${s.connected_for}</td>
+        <td>${s.kbytes_read}</td>`;
+    } else {
+      tr.innerHTML = `
+        <td>${esc(s.mountpoint)}</td>
+        <td class="badge-offline">Nicht verbunden</td>
+        <td>-</td>
+        <td>-</td>
+        <td>-</td>`;
+    }
+    tbody.appendChild(tr);
+  }
+  if (!data.sources || data.sources.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="badge-offline">Keine Quellen konfiguriert</td></tr>';
+  }
+}
+
+async function createUser() {
+  const username = document.getElementById("newUsername").value.trim();
+  const password = document.getElementById("newPassword").value;
+  const max_connections = parseInt(document.getElementById("newMaxConn").value || "1");
+  const valid_until = document.getElementById("newValidUntil").value.trim() || null;
+  if (!username || !password) {
+    document.getElementById("createMsg").innerText = "Username und Passwort sind Pflicht.";
+    return;
+  }
+  const r = await fetch("/api/users", {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({ username, password, max_connections, valid_until })
+  });
+  if (r.ok) {
+    document.getElementById("createMsg").innerText = "Angelegt.";
+    document.getElementById("newUsername").value = "";
+    document.getElementById("newPassword").value = "";
+    document.getElementById("newValidUntil").value = "";
+    refreshAll();
+  } else {
+    const err = await r.json();
+    document.getElementById("createMsg").innerText = "Fehler: " + (err.detail || r.status);
+  }
+}
+
+async function toggleActive(username, active) {
+  await fetch("/api/users/" + encodeURIComponent(username), {
+    method: "PATCH",
+    headers: headers(),
+    body: JSON.stringify({ active: active })
+  });
+  refreshAll();
+}
+
+async function deleteUser(username) {
+  if (!confirm("Nutzer '" + username + "' wirklich loeschen?")) return;
+  await fetch("/api/users/" + encodeURIComponent(username), {
+    method: "DELETE",
+    headers: headers()
+  });
+  refreshAll();
+}
+
+// --- Trimble/GNSS-Basisstation-Adresse ------------------------------------
+async function loadTrimbleSettings() {
+  const r = await fetch("/api/trimble-settings", { headers: headers() });
+  if (!r.ok) return;
+  const s = await r.json();
+  document.getElementById("trimbleHost").value = s.host;
+  document.getElementById("trimblePortLegacy").value = s.port_legacy;
+  document.getElementById("trimblePortMsm").value = s.port_msm;
+}
+
+async function saveTrimbleSettings() {
+  if (!confirm("Basisstations-Adresse aendern? Loest einen kurzen Resync aus (alle Streams ca. 20-60s unterbrochen).")) return;
+  const body = {
+    host: document.getElementById("trimbleHost").value,
+    port_legacy: parseInt(document.getElementById("trimblePortLegacy").value),
+    port_msm: parseInt(document.getElementById("trimblePortMsm").value),
+  };
+  document.getElementById("trimbleSettingsMsg").innerText = "Schalte um, bitte warten...";
+  const r = await fetch("/api/trimble-settings", { method: "POST", headers: headers(), body: JSON.stringify(body) });
+  document.getElementById("trimbleSettingsMsg").innerText = r.ok ? "Gespeichert und Resync ausgefuehrt." : "Fehler beim Speichern.";
+}
+
+let coverageKm = 30;
+let baseLatLon = null;
+async function loadCoverageKm() {
+  const [sys, base] = await Promise.all([getJson("/api/system-settings", 60000), getJson("/api/base-position", 10000)]);
+  if (sys) coverageKm = sys.station_coverage_km || 30;
+  if (base) baseLatLon = [base.lat, base.lon];
+}
+
+function coverageCircle(lat, lon, fill) {
+  return L.circle([lat, lon], {
+    radius: coverageKm * 1000, color: "#facc15", weight: 1, opacity: 0.8,
+    fillColor: "#facc15", fillOpacity: fill, interactive: false,
+  });
+}
+
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function randomPw(inputId) {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+  const arr = new Uint32Array(20);
+  crypto.getRandomValues(arr);
+  const el = document.getElementById(inputId);
+  el.value = Array.from(arr, n => chars[n % chars.length]).join("");
+  el.type = "text";
+}
+
+async function loadSecurityStatus() {
+  const r = await fetch("/api/security-status", { headers: headers() });
+  if (!r.ok) return;
+  const s = await r.json();
+  const bad = t => `<span class="badge-inactive">${t}</span>`;
+  const good = t => `<span class="badge-active">${t}</span>`;
+  document.getElementById("secGui").innerHTML = s.gui_token_default ? bad("Standard-Token aktiv!") : good("gesetzt");
+  document.getElementById("secCasterAdmin").innerHTML = s.caster_admin_ok ? good("Login am Caster OK") : bad("Caster lehnt gespeichertes Passwort ab");
+}
+
+async function loadSystemSettings() {
+  const r = await fetch("/api/system-settings", { headers: headers() });
+  if (!r.ok) return;
+  const s = await r.json();
+  document.getElementById("sysHost").value = s.public_hostname;
+  document.getElementById("sysPort").value = s.public_ntrip_port;
+  document.getElementById("sysSourcetableMode").value = s.sourcetable_mode;
+  document.getElementById("sysNearRecheck").value = s.near_recheck_s;
+  document.getElementById("sysNearDwell").value = s.near_min_dwell_s;
+  document.getElementById("sysNearHyst").value = s.near_hysteresis_km;
+  document.getElementById("sysFoFail").value = s.failover_fail_threshold;
+  document.getElementById("sysFoRecover").value = s.failover_recover_threshold;
+  document.getElementById("sysFailback").value = s.failback_stable_s;
+  document.getElementById("sysRetention").value = s.retention_days;
+  document.getElementById("sysCoverage").value = s.station_coverage_km;
+}
+
+async function saveSystemSettings() {
+  const num = id => parseFloat(document.getElementById(id).value);
+  const body = {
+    public_hostname: document.getElementById("sysHost").value.trim(),
+    public_ntrip_port: parseInt(document.getElementById("sysPort").value),
+    sourcetable_mode: document.getElementById("sysSourcetableMode").value,
+    near_recheck_s: num("sysNearRecheck"),
+    near_min_dwell_s: num("sysNearDwell"),
+    near_hysteresis_km: num("sysNearHyst"),
+    failover_fail_threshold: parseInt(document.getElementById("sysFoFail").value),
+    failover_recover_threshold: parseInt(document.getElementById("sysFoRecover").value),
+    failback_stable_s: num("sysFailback"),
+    retention_days: parseInt(document.getElementById("sysRetention").value),
+    station_coverage_km: num("sysCoverage"),
+  };
+  const r = await fetch("/api/system-settings", { method: "POST", headers: headers(), body: JSON.stringify(body) });
+  const res = await r.json();
+  document.getElementById("sysSettingsMsg").innerText = r.ok ? "Gespeichert." : ("Fehler: " + (res.detail || r.status));
+}
+
+async function changeGuiToken() {
+  const newToken = document.getElementById("newGuiToken").value;
+  if (!newToken || newToken.length < 6) {
+    document.getElementById("guiTokenMsg").innerText = "Mindestens 6 Zeichen.";
+    return;
+  }
+  const r = await fetch("/api/settings/admin-token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ current_token: token, new_token: newToken })
+  });
+  if (r.ok) {
+    token = newToken;
+    localStorage.setItem("ntrip_admin_token", token);
+    document.getElementById("guiTokenMsg").innerText = "Geaendert. Ab jetzt mit neuem Token einloggen.";
+    document.getElementById("newGuiToken").value = "";
+  } else {
+    const err = await r.json();
+    document.getElementById("guiTokenMsg").innerText = "Fehler: " + (err.detail || r.status);
+  }
+}
+
+async function changeCasterPass() {
+  const newPass = document.getElementById("newCasterPass").value;
+  if (!newPass || newPass.length < 6) {
+    document.getElementById("casterPassMsg").innerText = "Mindestens 6 Zeichen.";
+    return;
+  }
+  const r = await fetch("/api/settings/caster-admin-password", {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({ new_password: newPass })
+  });
+  if (r.ok) {
+    const res = await r.json();
+    document.getElementById("casterPassMsg").innerText = res.verified
+      ? "Geaendert; Caster akzeptiert das neue Passwort."
+      : "Geaendert, aber der Caster hat das neue Passwort noch nicht uebernommen -- Status unten pruefen.";
+    loadSecurityStatus();
+    document.getElementById("newCasterPass").value = "";
+  } else {
+    const err = await r.json();
+    document.getElementById("casterPassMsg").innerText = "Fehler: " + (err.detail || r.status);
+  }
+}
+
+// --- Verlauf (S6) -------------------------------------------------------
+async function populateHistoryUserSelect() {
+  const r = await fetch("/api/users", { headers: headers() });
+  const users = await r.json();
+  const sel = document.getElementById("historyUserSelect");
+  const current = sel.value;
+  sel.innerHTML = "";
+  for (const u of users) {
+    const opt = document.createElement("option");
+    opt.value = u.username;
+    opt.innerText = u.username;
+    sel.appendChild(opt);
+  }
+  if (current) sel.value = current;
+}
+
+async function fetchHistory(username, hours, date) {
+  const params = new URLSearchParams();
+  if (username) params.set("username", username);
+  if (date) {
+    params.set("date", date);
+  } else {
+    params.set("hours", hours);
+  }
+  const r = await fetch("/api/position-history?" + params.toString(), { headers: headers() });
+  return r.ok ? await r.json() : [];
+}
+
+function onHistoryRangeChange() {
+  document.getElementById("historyDateInput").value = "";
+  loadHistory();
+}
+
+function clearHistoryDate() {
+  document.getElementById("historyDateInput").value = "";
+  loadHistory();
+}
+
+let historyMap = null;
+let historyTrackLine = null;
+const historyMarkers = [];
+
+function initHistoryMap() {
+  if (historyMap) return;
+  historyMap = L.map("historyMap").setView([51.0, 10.0], 6);
+  L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", { maxZoom: 19, attribution: "Tiles &copy; Esri" }).addTo(historyMap);
+  L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}", { maxZoom: 19, attribution: "Labels &copy; Esri" }).addTo(historyMap);
+}
+
+function renderHistoryMap(rows) {
+  initHistoryMap();
+  historyMarkers.forEach(m => historyMap.removeLayer(m));
+  historyMarkers.length = 0;
+  if (historyTrackLine) { historyMap.removeLayer(historyTrackLine); historyTrackLine = null; }
+
+  if (!rows.length) return;
+  const pts = rows.map(p => [p.lat, p.lon]);
+  historyTrackLine = L.polyline(pts, { color: "#38bdf8", weight: 3, opacity: 0.8 }).addTo(historyMap);
+
+  const start = L.circleMarker(pts[0], { radius: 6, color: "white", fillColor: "#22c55e", fillOpacity: 1 }).addTo(historyMap).bindPopup("Start: " + rows[0].ts);
+  const end = L.circleMarker(pts[pts.length - 1], { radius: 6, color: "white", fillColor: "#dc2626", fillOpacity: 1 }).addTo(historyMap).bindPopup("Ende: " + rows[rows.length - 1].ts);
+  historyMarkers.push(start, end);
+
+  historyMap.fitBounds(pts, { padding: [30, 30] });
+}
+
+async function loadHistory() {
+  const username = document.getElementById("historyUserSelect").value;
+  const hours = document.getElementById("historyRangeSelect").value;
+  const date = document.getElementById("historyDateInput").value;
+  const rows = await fetchHistory(username, hours, date);
+  const tbody = document.querySelector("#historyTable tbody");
+  tbody.innerHTML = "";
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="badge-offline">Keine Daten im gewaehlten Zeitraum</td></tr>';
+    renderHistoryMap([]);
+    return;
+  }
+  for (const p of rows.slice().reverse()) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${p.ts}</td>
+      <td>${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}</td>
+      <td>${p.sat_count ?? '-'}</td>
+      <td>${p.fix_quality}</td>`;
+    tbody.appendChild(tr);
+  }
+  renderHistoryMap(rows);
+}
+
+// --- Karte (S6) -------------------------------------------------------
+let map = null;
+let baseMarker = null;
+let baseCircle = null;
+const regionalStationCircles = {};
+let currentTileLayer = null;
+const machineMarkers = {};
+const regionalStationMarkers = {};
+let trackLine = null;
+let hasAutoFitted = false;
+
+const TILE_LAYERS = {
+  hybrid: {
+    layers: () => [
+      L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", { maxZoom: 19, attribution: "Tiles &copy; Esri" }),
+      L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}", { maxZoom: 19, attribution: "Labels &copy; Esri" }),
+    ],
+  },
+  osm: { layers: () => [L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap-Mitwirkende" })] },
+  topo: { layers: () => [L.tileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", { maxZoom: 17, attribution: "&copy; OpenStreetMap-Mitwirkende, SRTM | &copy; OpenTopoMap" })] },
+  satellite: { layers: () => [L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", { maxZoom: 19, attribution: "Tiles &copy; Esri" })] },
+};
+
+function initMap() {
+  if (map) return;
+  map = L.map("map").setView([51.0, 10.0], 6);
+  document.getElementById("tileSelect").value = "hybrid";
+  switchTileLayer();
+}
+
+function switchTileLayer() {
+  const key = document.getElementById("tileSelect").value;
+  if (currentTileLayer) {
+    currentTileLayer.forEach(l => map.removeLayer(l));
+  }
+  currentTileLayer = TILE_LAYERS[key].layers();
+  currentTileLayer.forEach(l => l.addTo(map));
+}
+
+function centerMap() {
+  const bounds = [];
+  if (baseMarker) bounds.push(baseMarker.getLatLng());
+  for (const m of Object.values(machineMarkers)) bounds.push(m.getLatLng());
+  if (bounds.length > 1) {
+    map.fitBounds(bounds, { padding: [30, 30] });
+  } else if (bounds.length === 1) {
+    map.setView(bounds[0], 12);
+  }
+}
+
+function zoomToMachine(username) {
+  showPage("page-status");
+  const doZoom = () => {
+    const marker = machineMarkers[username];
+    if (marker) {
+      map.setView(marker.getLatLng(), 17);
+      marker.openPopup();
+    }
+  };
+  if (map) {
+    setTimeout(doZoom, 60);
+  } else {
+    setTimeout(() => { updateMap().then(doZoom); }, 60);
+  }
+}
+
+function machineIcon(online, fixQuality) {
+  let color = "#64748b";
+  if (online) {
+    color = (fixQuality === 4) ? "#22c55e" : (fixQuality >= 1 ? "#eab308" : "#f87171");
+  }
+  return L.divIcon({
+    className: "",
+    html: `<div style="background:${color};width:16px;height:16px;border-radius:50%;border:2px solid white;box-shadow:0 0 4px rgba(0,0,0,.6)"></div>`,
+    iconSize: [16, 16],
+  });
+}
+
+async function updateMap() {
+  initMap();
+  await loadCoverageKm();
+
+  const base = await getJson("/api/base-position", 10000);
+  if (base) {
+    if (!baseMarker) {
+      baseMarker = L.marker([base.lat, base.lon], {
+        icon: L.divIcon({
+          className: "",
+          html: '<div style="background:#2563eb;width:20px;height:20px;border-radius:4px;border:2px solid white;box-shadow:0 0 4px rgba(0,0,0,.6)"></div>',
+        })
+      }).addTo(map).bindPopup("Basisstation (Trimble BD982)<br>Abdeckung siehe gelber Kreis");
+    } else {
+      baseMarker.setLatLng([base.lat, base.lon]);
+    }
+    if (!baseCircle) {
+      baseCircle = coverageCircle(base.lat, base.lon, 0.15).addTo(map);
+    } else {
+      baseCircle.setLatLng([base.lat, base.lon]);
+      baseCircle.setRadius(coverageKm * 1000);
+    }
+  }
+
+  const rows = (await getJson("/api/machine-status")) || [];
+  const bounds = [];
+  if (baseMarker) bounds.push(baseMarker.getLatLng());
+
+  // Konfigurierte Regional-Stationen (Backup/EUREF/RTK2go etc.) ebenfalls anzeigen
+  const regStations = await getJson("/api/regional-stations");
+  if (regStations) {
+    const liveKeys = new Set(regStations.map(s => s.key));
+    for (const k of Object.keys(regionalStationMarkers)) {
+      if (!liveKeys.has(k)) {   // geloeschte/umbenannte Stationen von der Karte nehmen
+        map.removeLayer(regionalStationMarkers[k]); delete regionalStationMarkers[k];
+        if (regionalStationCircles[k]) { map.removeLayer(regionalStationCircles[k]); delete regionalStationCircles[k]; }
+      }
+    }
+    for (const s of regStations) {
+      const pos = [s.lat, s.lon];
+      bounds.push(pos);
+      if (regionalStationCircles[s.key]) {
+        regionalStationCircles[s.key].setLatLng(pos);
+        regionalStationCircles[s.key].setRadius(coverageKm * 1000);
+      } else {
+        regionalStationCircles[s.key] = coverageCircle(s.lat, s.lon, 0.12).addTo(map);
+      }
+      const popupText = `<strong>${esc(s.name)}</strong><br>Mountpoint: /${esc(s.key)}<br>${s.enabled ? "Als Mountpoint aktiv" : "Nicht als Mountpoint aktiv"}<br>Abdeckung ca. ${coverageKm} km${s.backup_for ? "<br>Backup fuer " + (s.backup_for === "RTCM32" ? "Trimble (/RTCM32)" : "/" + s.backup_for) : ""}`;
+      if (regionalStationMarkers[s.key]) {
+        regionalStationMarkers[s.key].setLatLng(pos);
+        regionalStationMarkers[s.key].setPopupContent(popupText);
+      } else {
+        regionalStationMarkers[s.key] = L.marker(pos, {
+          icon: L.divIcon({
+            className: "",
+            html: `<div style="background:${s.enabled ? "#a855f7" : "#64748b"};width:16px;height:16px;border-radius:4px;border:2px solid white;box-shadow:0 0 4px rgba(0,0,0,.6)"></div>`,
+          })
+        }).addTo(map).bindPopup(popupText);
+      }
+    }
+  }
+
+  // Karte zeigt nur Positionen von heute (lokale Mitternacht, DB-Zeiten sind UTC)
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const isToday = (s) => {
+    if (!s) return false;
+    const iso = s.replace(" ", "T");
+    return new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + "Z") >= todayStart;
+  };
+
+  for (const m of rows) {
+    if (m.last_lat == null || m.last_lon == null || !isToday(m.last_pos_at)) {
+      if (machineMarkers[m.username]) {
+        map.removeLayer(machineMarkers[m.username]);
+        delete machineMarkers[m.username];
+      }
+      continue;
+    }
+    const pos = [m.last_lat, m.last_lon];
+    bounds.push(pos);
+    const popupText = `<strong>${esc(m.username)}</strong><br>${m.online ? "Online" : "Offline"}<br>${m.fix_quality_label}, ${m.last_sat_count ?? "-"} Sat.<br>Distanz: ${m.last_distance_km ?? "-"} km`;
+    if (machineMarkers[m.username]) {
+      machineMarkers[m.username].setLatLng(pos);
+      machineMarkers[m.username].setIcon(machineIcon(m.online, m.last_fix_quality));
+      machineMarkers[m.username].setPopupContent(popupText);
+    } else {
+      machineMarkers[m.username] = L.marker(pos, { icon: machineIcon(m.online, m.last_fix_quality) })
+        .addTo(map).bindPopup(popupText);
+    }
+  }
+
+  if (trackLine) { map.removeLayer(trackLine); trackLine = null; }
+  if (document.getElementById("showTrackOnMap").checked) {
+    const sinceUtc = todayStart.toISOString().slice(0, 19).replace("T", " ");
+    const hist = await getJson("/api/position-history?since=" + encodeURIComponent(sinceUtc), 10000) || [];
+    const byUser = {};
+    for (const p of hist) {
+      (byUser[p.username] = byUser[p.username] || []).push([p.lat, p.lon]);
+    }
+    trackLine = L.layerGroup();
+    for (const pts of Object.values(byUser)) {
+      if (pts.length > 1) {
+        L.polyline(pts, { color: "#38bdf8", weight: 2, opacity: 0.6 }).addTo(trackLine);
+      }
+    }
+    trackLine.addTo(map);
+  }
+
+  if (bounds.length > 1 && !hasAutoFitted) {
+    map.fitBounds(bounds, { padding: [30, 30] });
+    hasAutoFitted = true;
+  } else if (bounds.length === 1 && !hasAutoFitted) {
+    map.setView(bounds[0], 12);
+    hasAutoFitted = true;
+  }
+}
+
+// Auto-Refresh alle 15s
+function autoRefresh() {
+  if (document.hidden || document.getElementById("app").style.display === "none") return;
+  loadStations();
+  loadMachineStatus();
+  updateMap();
+  loadConnectionInfo();
+  loadAlerts();
+}
+setInterval(autoRefresh, 15000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) autoRefresh(); });
+
+// --- Sortierbare Tabellen ------------------------------------------------
+function makeSortable(tableId) {
+  const table = document.getElementById(tableId);
+  if (!table || table.dataset.sortableInit) return;
+  table.dataset.sortableInit = "1";
+  const headers = table.querySelectorAll("thead th[data-sort]");
+  headers.forEach((th, colIndex) => {
+    th.addEventListener("click", () => {
+      const type = th.dataset.sort;
+      const asc = !th.classList.contains("sort-asc");
+      headers.forEach(h => h.classList.remove("sort-asc", "sort-desc"));
+      th.classList.add(asc ? "sort-asc" : "sort-desc");
+
+      const tbody = table.querySelector("tbody");
+      const rows = Array.from(tbody.querySelectorAll("tr"));
+      rows.sort((r1, r2) => {
+        const c1 = r1.children[colIndex]?.innerText.trim() ?? "";
+        const c2 = r2.children[colIndex]?.innerText.trim() ?? "";
+        let cmp;
+        if (type === "num") {
+          const n1 = parseFloat(c1.replace(/[^0-9.\-]/g, "")) || -Infinity;
+          const n2 = parseFloat(c2.replace(/[^0-9.\-]/g, "")) || -Infinity;
+          cmp = n1 - n2;
+        } else {
+          cmp = c1.localeCompare(c2, "de");
+        }
+        return asc ? cmp : -cmp;
+      });
+      rows.forEach(r => tbody.appendChild(r));
+    });
+  });
+}
+
+function initAllSortableTables() {
+  ["stationsTable", "machineStatusTable", "usersTable", "historyTable"].forEach(makeSortable);
+}
+
+// --- Verbindungsdaten / Ping ---------------------------------------------
+async function loadConnectionInfo() {
+  const r = await fetch("/api/connection-info", { headers: headers() });
+  if (!r.ok) return;
+  const info = await r.json();
+  document.getElementById("ciServer").innerText = `${esc(info.server_hostname)}${info.server_ip ? " (" + info.server_ip + ")" : ""}`;
+  document.getElementById("ciPort").innerText = info.port;
+  const det = info.mountpoint_details || [];
+  document.getElementById("ciMountpoints").innerHTML = det.map(d => {
+    const dot = d.live === null ? "" : (d.live ? '<span class="badge-online">&#9679;</span> ' : '<span class="badge-offline">&#9679;</span> ');
+    let txt = `<strong>${esc(d.name)}</strong> &ndash; ${esc(d.label)}`;
+    if (d.live === false) {
+      txt += d.serving ? ` &ndash; ausgefallen, <strong>${esc(d.serving)}</strong> uebernimmt` : " &ndash; nicht verbunden";
+    }
+    if (d.backups && d.backups.length) txt += ` <span class="msg">(Backup: ${esc(d.backups.join(", "))})</span>`;
+    return `<div>${dot}${txt}</div>`;
+  }).join("") || "-";
+  const pings = info.trimble_pings_ms || {};
+  const pingTxt = Object.entries(pings).map(([port, ms]) => `${port}: ${ms !== null ? ms + " ms" : "nicht erreichbar"}`).join(" / ");
+  document.getElementById("ciPing").innerText = pingTxt;
+}
+
+// --- S7: Mehrfachnutzungs-Alarm ------------------------------------------
+async function loadAlerts() {
+  const r = await fetch("/api/alerts?include_resolved=false", { headers: headers() });
+  const alerts = r.ok ? await r.json() : [];
+  const tbody = document.querySelector("#alertsTable tbody");
+  tbody.innerHTML = "";
+
+  const openAlerts = alerts.filter(a => !a.resolved_at);
+  const banner = document.getElementById("alertBanner");
+  if (openAlerts.length > 0) {
+    banner.style.display = "block";
+    banner.innerHTML = `&#9888; <strong>${openAlerts.length} aktive(r) Alarm(e)!</strong> ` +
+      openAlerts.map(a => `${esc(a.username)} (${esc(a.reason)})`).join(" | ");
+  } else {
+    banner.style.display = "none";
+  }
+
+  if (!alerts.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="badge-offline">Keine aktiven Alarme</td></tr>';
+    return;
+  }
+  for (const a of alerts) {
+    const tr = document.createElement("tr");
+    const statusTxt = a.resolved_at
+      ? `<span class="badge-offline">Beendet</span>`
+      : `<span class="badge-inactive" style="font-weight:700">OFFEN</span>`;
+    tr.innerHTML = `
+      <td>${a.detected_at}</td>
+      <td>${esc(a.username)}</td>
+      <td>${esc(a.reason)}${a.auto_kicked ? " (automatisch gekickt+gesperrt)" : ""}</td>
+      <td>${statusTxt}</td>
+      <td>${a.resolved_at ? "" : `<button class="secondary" onclick="resolveAlert(${a.id})">Als erledigt markieren</button>`}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+async function resolveAlert(id) {
+  await fetch(`/api/alerts/${id}/resolve`, { method: "POST", headers: headers() });
+  loadAlerts();
+}
+
+async function loadAlertSettings() {
+  const r = await fetch("/api/alert-settings", { headers: headers() });
+  if (!r.ok) return;
+  const s = await r.json();
+  document.getElementById("alertGrace").value = s.grace_seconds;
+  document.getElementById("alertDistance").value = s.distance_m;
+  document.getElementById("alertAutoKick").checked = s.auto_kick;
+  document.getElementById("alertWebhook").value = s.webhook_url;
+}
+
+async function saveAlertSettings() {
+  const body = {
+    grace_seconds: parseInt(document.getElementById("alertGrace").value),
+    distance_m: parseFloat(document.getElementById("alertDistance").value),
+    auto_kick: document.getElementById("alertAutoKick").checked,
+    webhook_url: document.getElementById("alertWebhook").value,
+  };
+  const r = await fetch("/api/alert-settings", {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify(body),
+  });
+  document.getElementById("alertSettingsMsg").innerText = r.ok ? "Gespeichert." : "Fehler beim Speichern.";
+}
+
+// --- S8: Failover ---------------------------------------------------------
+async function loadFailoverSettings() {
+  const r = await fetch("/api/failover-settings", { headers: headers() });
+  if (!r.ok) return;
+  const s = await r.json();
+  document.getElementById("foHost").value = s.eurefip_host;
+  document.getElementById("foPort").value = s.eurefip_port;
+  document.getElementById("foUser").value = s.eurefip_user;
+  document.getElementById("foPass").value = s.eurefip_pass;
+}
+
+async function saveFailoverSettings() {
+  const body = {
+    eurefip_host: document.getElementById("foHost").value,
+    eurefip_port: parseInt(document.getElementById("foPort").value),
+    eurefip_user: document.getElementById("foUser").value,
+    eurefip_pass: document.getElementById("foPass").value,
+  };
+  await fetch("/api/failover-settings", { method: "POST", headers: headers(), body: JSON.stringify(body) });
+}
+
+async function testFailoverCredentials() {
+  document.getElementById("failoverMsg").innerText = "Teste...";
+  await saveFailoverSettings();
+  const r = await fetch("/api/failover-test-credentials", { method: "POST", headers: headers() });
+  const res = await r.json();
+  document.getElementById("failoverMsg").innerText = res.ok
+    ? "Zugangsdaten funktionieren! (HTTP " + res.status_code + ")"
+    : "Fehlgeschlagen: " + (res.error || ("HTTP " + res.status_code));
+}
+
+async function manualFailoverSwitch(useBackup) {
+  if (!confirm("Wirklich umschalten? Verbundene Rover der Trimble werden kurz getrennt und verbinden sich neu.")) return;
+  document.getElementById("manualSwitchMsg").innerText = "Schalte um...";
+  const r = await fetch("/api/failover-manual-switch?use_backup=" + useBackup, { method: "POST", headers: headers() });
+  const res = await r.json();
+  document.getElementById("manualSwitchMsg").innerText = res.ok ? "Umgeschaltet." : ("Fehler: " + (res.detail || r.status));
+  loadFailoverStatus();
+}
+
+async function loadFailoverStatus() {
+  const r = await fetch("/api/failover-status", { headers: headers() });
+  if (!r.ok) return;
+  const s = await r.json();
+  const maps = s.mappings || [];
+  let txt;
+  if (!maps.length) {
+    txt = "Keine Backup-Stationen konfiguriert";
+  } else {
+    txt = maps.map(m => {
+      const state = m.active ? `BACKUP aktiv (${m.serving || "kein Backup live"})` : "Primaerquelle";
+      return `${m.primary === "/RTCM32" ? "Trimble (/RTCM32)" : m.primary}: ${state}${m.forced ? " [manuell]" : ""}`;
+    }).join(" | ");
+  }
+  document.getElementById("failoverStatusText").innerText =
+    `${txt} | letzte Pruefung: ${s.last_check || "-"} | letzter Wechsel: ${s.last_switch || "noch nie"}`;
+}
+
+// --- Regional-Stationen (konfigurierbar) ---------------------------------
+let lastConfiguredStations = [];
+
+async function loadCasters() {
+  const r = await fetch("/api/casters", { headers: headers() });
+  if (!r.ok) return;
+  const casters = await r.json();
+  const tbody = document.querySelector("#castersTable tbody");
+  tbody.innerHTML = "";
+  if (!casters.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="badge-offline">Noch keine Stationen hinzugefuegt</td></tr>';
+    return;
+  }
+  casters.forEach((c, idx) => {
+    const tr = document.createElement("tr");
+    const portId = "caster_port_" + idx;
+    const userId = "caster_user_" + idx;
+    const passId = "caster_pass_" + idx;
+    tr.innerHTML = `
+      <td>${esc(c.host)}</td>
+      <td><input id="${portId}" type="number" value="${c.port}" style="width:6rem"></td>
+      <td><input id="${userId}" type="text" value="${esc(c.user)}" style="width:10rem"></td>
+      <td><input id="${passId}" type="password" value="${esc(c.pass)}" style="width:10rem"></td>
+      <td>${c.station_count} (${esc(c.stations.join(", "))})</td>
+      <td>
+        <button class="secondary" onclick="testCasterCredentials('${esc(c.host)}', '${portId}', '${userId}', '${passId}')">Testen</button>
+        <button onclick="applyCasterCredentials('${esc(c.host)}', '${portId}', '${userId}', '${passId}')">Uebernehmen</button>
+      </td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function testCasterCredentials(host, portId, userId, passId) {
+  document.getElementById("castersMsg").innerText = "Teste...";
+  const body = {
+    port: parseInt(document.getElementById(portId).value),
+    user: document.getElementById(userId).value,
+    password: document.getElementById(passId).value,
+  };
+  const r = await fetch("/api/casters/test?host=" + encodeURIComponent(host), {
+    method: "POST", headers: headers(), body: JSON.stringify(body),
+  });
+  const res = await r.json();
+  document.getElementById("castersMsg").innerText = res.ok
+    ? `Funktioniert! (getestet mit Station ${res.tested_mountpoint})`
+    : "Fehlgeschlagen: " + (res.error || ("HTTP " + res.status_code));
+}
+
+async function applyCasterCredentials(host, portId, userId, passId) {
+  const body = {
+    port: parseInt(document.getElementById(portId).value),
+    user: document.getElementById(userId).value,
+    password: document.getElementById(passId).value,
+  };
+  document.getElementById("castersMsg").innerText = "Uebernehme fuer alle Stationen dieses Casters...";
+  const r = await fetch("/api/casters/" + encodeURIComponent(host) + "/credentials", {
+    method: "POST", headers: headers(), body: JSON.stringify(body),
+  });
+  const res = await r.json();
+  document.getElementById("castersMsg").innerText = res.ok ? "Uebernommen und Resync ausgefuehrt." : "Fehler.";
+  loadRegionalStations();
+  loadCasters();
+}
+
+async function loadRegionalStations() {
+  const r = await fetch("/api/regional-stations", { headers: headers() });
+  if (!r.ok) return;
+  const stations = await r.json();
+  lastConfiguredStations = stations;
+  await loadCoverageKm();
+  loadConnectionInfo();
+  const tbody = document.querySelector("#regionalStationsTable tbody");
+  tbody.innerHTML = "";
+  if (!stations.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="badge-offline">Noch keine Stationen hinzugefuegt -- weiter unten suchen</td></tr>';
+    renderEuMap(lastSearchResults);
+    return;
+  }
+  for (const s of stations) {
+    const tr = document.createElement("tr");
+    const renameId = "rename_" + s.key.replace(/[^a-zA-Z0-9]/g, "_");
+    tr.innerHTML = `
+      <td>
+        <input id="${renameId}" type="text" value="${esc(s.key)}" style="width:10rem">
+        <button class="secondary" onclick="renameRegionalStation('${esc(s.key)}', '${renameId}')">Umbenennen</button>
+      </td>
+      <td>${esc(s.remote_mountpoint)}</td>
+      <td>${esc(s.caster_host || "-")}</td>
+      <td><input type="checkbox" ${s.enabled ? "checked" : ""} onchange="updateRegionalStation('${esc(s.key)}', 'enabled', this.checked)"></td>
+      <td>${backupSelect(s, stations)}</td>
+      <td><button class="danger" onclick="deleteRegionalStation('${esc(s.key)}')">Entfernen</button></td>`;
+    tbody.appendChild(tr);
+  }
+  renderEuMap(lastSearchResults);
+}
+
+function backupSelect(s, stations) {
+  const opts = ['<option value="">- kein Backup -</option>',
+                `<option value="RTCM32" ${s.backup_for === "RTCM32" ? "selected" : ""}>Trimble (/RTCM32)</option>`];
+  for (const o of stations) {
+    if (o.key === s.key) continue;
+    opts.push(`<option value="${esc(o.key)}" ${s.backup_for === o.key ? "selected" : ""}>/${esc(o.key)}</option>`);
+  }
+  return `<select onchange="updateRegionalStation('${esc(s.key)}', 'backup_for', this.value)">${opts.join("")}</select>`;
+}
+
+async function deleteRegionalStation(key) {
+  if (!confirm("Station '" + key + "' wirklich entfernen?")) return;
+  await fetch("/api/regional-stations/" + encodeURIComponent(key), { method: "DELETE", headers: headers() });
+  loadRegionalStations();
+  searchEurefStations();
+}
+
+async function renameRegionalStation(oldKey, inputId) {
+  const newKey = document.getElementById(inputId).value.trim();
+  if (!newKey || newKey === oldKey) return;
+  const r = await fetch("/api/regional-stations-rename/" + encodeURIComponent(oldKey), {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({ new_key: newKey }),
+  });
+  if (!r.ok) {
+    const err = await r.json();
+    alert("Fehler: " + (err.detail || r.status));
+  }
+  loadRegionalStations();
+}
+
+let lastSearchResults = [];
+
+async function searchEurefStations() {
+  const q = document.getElementById("euSearch").value;
+  const tbody = document.querySelector("#euSourcetableTable tbody");
+  tbody.innerHTML = '<tr><td colspan="6" class="msg">Lade...</td></tr>';
+  const host = document.getElementById("foHost").value.trim();
+  const port = parseInt(document.getElementById("foPort").value);
+  let qs = "search=" + encodeURIComponent(q);
+  if (host) qs += "&host=" + encodeURIComponent(host);
+  if (port) qs += "&port=" + port;
+  const r = await fetch("/api/euref-sourcetable?" + qs, { headers: headers() });
+  const data = await r.json();
+  tbody.innerHTML = "";
+  if (!r.ok) {
+    tbody.innerHTML = `<tr><td colspan="6" class="badge-offline">Fehler: ${esc(data.detail || r.status)}</td></tr>`;
+    renderEuMap([]);
+    return;
+  }
+  const stations = (data.stations || []).slice(0, 100);
+  lastSearchResults = stations;
+  if (!stations.length) {
+    const why = data.error ? esc(data.error) : "Keine Treffer";
+    tbody.innerHTML = `<tr><td colspan="6" class="badge-offline">${why}</td></tr>`;
+    renderEuMap([]);
+    return;
+  }
+  stations.forEach((s, idx) => {
+    const tr = document.createElement("tr");
+    const addBtn = s.added
+      ? '<span class="badge-active">Hinzugefuegt</span>'
+      : `<button class="secondary" onclick="addEurefStationByIndex(${idx})">Hinzufuegen</button>`;
+    tr.innerHTML = `
+      <td>${esc(s.mountpoint)}</td>
+      <td>${esc(s.identifier)}</td>
+      <td>${esc(s.format)}</td>
+      <td>${esc(s.country)}</td>
+      <td>${s.lat.toFixed(3)}, ${s.lon.toFixed(3)}</td>
+      <td>${addBtn}</td>`;
+    tbody.appendChild(tr);
+  });
+  if ((data.total || 0) > stations.length) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td colspan="6" class="msg">Zeige ${stations.length} von ${data.total} Stationen -- Suche verfeinern (Ort, Mountpoint, Land).</td>`;
+    tbody.appendChild(tr);
+  }
+  renderEuMap(stations);
+}
+
+function addEurefStationByIndex(idx) {
+  addEurefStation(lastSearchResults[idx]);
+}
+
+let euMap = null;
+const euMapMarkers = [];
+function renderEuMap(searchResults) {
+  if (!euMap) {
+    euMap = L.map("euMap").setView([50.0, 10.0], 4);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap-Mitwirkende" }).addTo(euMap);
+  }
+  euMapMarkers.forEach(m => euMap.removeLayer(m));
+  euMapMarkers.length = 0;
+
+  // Konfigurierte Stationen (gruen) immer anzeigen, unabhaengig von der
+  // aktuellen Suche, damit man sie auf der Karte wiederfindet.
+  const byMountpoint = {};
+  for (const s of lastConfiguredStations) {
+    byMountpoint[s.remote_mountpoint] = {
+      mountpoint: s.remote_mountpoint, identifier: s.name,
+      lat: s.lat, lon: s.lon, added: true,
+    };
+  }
+  for (const s of (searchResults || [])) {
+    if (!byMountpoint[s.mountpoint]) {
+      byMountpoint[s.mountpoint] = s;
+    }
+  }
+  const stations = Object.values(byMountpoint);
+
+  const bounds = [];
+  if (baseLatLon) {
+    euMapMarkers.push(coverageCircle(baseLatLon[0], baseLatLon[1], 0.18).addTo(euMap));
+    euMapMarkers.push(L.marker(baseLatLon, {
+      icon: L.divIcon({ className: "", html: '<div style="background:#2563eb;width:16px;height:16px;border-radius:4px;border:2px solid white;box-shadow:0 0 4px rgba(0,0,0,.6)"></div>' })
+    }).addTo(euMap).bindPopup(`<strong>Basisstation (Trimble)</strong><br>Abdeckung ca. ${coverageKm} km`));
+    bounds.push(baseLatLon);
+  }
+  for (const s of stations) {
+    euMapMarkers.push(coverageCircle(s.lat, s.lon, s.added ? 0.18 : 0.10).addTo(euMap));
+  }
+  for (const s of stations) {
+    const color = s.added ? "#22c55e" : "#38bdf8";
+    const marker = L.marker([s.lat, s.lon], {
+      icon: L.divIcon({
+        className: "",
+        html: `<div style="background:${color};width:14px;height:14px;border-radius:50%;border:2px solid white;box-shadow:0 0 4px rgba(0,0,0,.6)"></div>`,
+      })
+    }).addTo(euMap).bindPopup(`<strong>${esc(s.identifier)}</strong><br>${esc(s.mountpoint)}<br>${s.added ? "Bereits hinzugefuegt" : "Noch nicht hinzugefuegt"}<br>Abdeckung ca. ${coverageKm} km`);
+    euMapMarkers.push(marker);
+    bounds.push([s.lat, s.lon]);
+  }
+  if (bounds.length > 0) {
+    euMap.fitBounds(bounds, { padding: [30, 30] });
+  }
+}
+
+
+async function addEurefStation(station) {
+  await fetch("/api/regional-stations-add", {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({
+      mountpoint: station.mountpoint,
+      identifier: station.identifier,
+      lat: station.lat,
+      lon: station.lon,
+      enabled: true,
+      caster_host: document.getElementById("foHost").value,
+      caster_port: parseInt(document.getElementById("foPort").value),
+      caster_user: document.getElementById("foUser").value,
+      caster_pass: document.getElementById("foPass").value,
+    }),
+  });
+  loadRegionalStations();
+  searchEurefStations();
+}
+
+async function updateRegionalStation(key, field, value) {
+  const body = {};
+  body[field] = value;
+  await fetch("/api/regional-stations/" + encodeURIComponent(key), {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify(body),
+  });
+  loadRegionalStations();
+  loadStations();
+}
+
+if (token) { tryShowApp(); }
+</script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+# Laufzeitdaten und Sicherungen -- enthalten Passwoerter, Datenbank, Logs
+data/
+_backups/
+*.bak-*
+__pycache__/
+*.pyc
