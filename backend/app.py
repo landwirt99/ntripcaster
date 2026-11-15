@@ -378,6 +378,7 @@ SYSTEM_DEFAULTS = {
     "retention_days": 365,
     "sourcetable_mode": "v1",
     "station_coverage_km": 30.0,
+    "source_timeout_s": 30,    # Caster: so lange ohne Daten einer Quelle (Standard 16) bis sie als "tot" gilt
     "relay_reconnect_s": 20,   # Caster: Wartezeit bis zum erneuten Verbindungsversuch eines abgerissenen Relays
     "trimble_ping_s": 30,      # ICMP-Ping zur Trimble: 1 Paket alle n Sekunden, 0 = aus
     "trimble_legacy": 1,       # 1 = Legacy-Strom /RTCM (RTCM 3.1) von der Trimble holen, 0 = nur /RTCM32
@@ -415,6 +416,7 @@ class SystemSettingsIn(BaseModel):
     trimble_legacy: int | None = None
     trimble_ping_s: int | None = None
     relay_reconnect_s: int | None = None
+    source_timeout_s: int | None = None
 
     @field_validator("public_hostname")
     @classmethod
@@ -438,7 +440,7 @@ SYSTEM_RANGES = {
     "near_recheck_s": (5, 3600), "near_min_dwell_s": (0, 86400), "near_hysteresis_km": (0, 1000),
     "failback_stable_s": (5, 3600), "failover_fail_threshold": (1, 20),
     "failover_recover_threshold": (1, 20), "retention_days": (7, 3650),
-    "station_coverage_km": (1, 500), "trimble_legacy": (0, 1), "trimble_ping_s": (0, 3600), "relay_reconnect_s": (5, 600),
+    "station_coverage_km": (1, 500), "trimble_legacy": (0, 1), "trimble_ping_s": (0, 3600), "relay_reconnect_s": (5, 600), "source_timeout_s": (10, 120),
 }
 
 
@@ -459,11 +461,11 @@ def get_system_settings_api(x_admin_token: str | None = Header(default=None)):
 def update_system_settings(body: SystemSettingsIn, x_admin_token: str | None = Header(default=None)):
     check_token(x_admin_token)
     _sys_ranges_ok(body)
-    before = (get_sys("trimble_legacy"), get_sys("relay_reconnect_s"))
+    before = (get_sys("trimble_legacy"), get_sys("relay_reconnect_s"), get_sys("source_timeout_s"))
     for k, v in body.model_dump(exclude_none=True).items():
         set_setting("sys_" + k, str(v))
     # Relay-Zeilen bzw. Caster-Konfiguration aendern sich -> neu schreiben + Resync
-    resync = write_relay_config() if (get_sys("trimble_legacy"), get_sys("relay_reconnect_s")) != before else None
+    resync = write_relay_config() if (get_sys("trimble_legacy"), get_sys("relay_reconnect_s"), get_sys("source_timeout_s")) != before else None
     return {"ok": True, "settings": get_all_sys(), "resync_status": resync}
 
 
@@ -1314,7 +1316,8 @@ def sync_caster_conf() -> bool:
     """Gleicht Caster-Einstellungen aus den Systemeinstellungen mit ntripcaster.conf ab. Der Caster liest
     die Datei nur beim Start/Resync; der Standard (60 s, Pruefung alle 30 s) bedeutet nach einem Abriss
     der Trimble-Verbindung bis zu 90 s ohne Datenstrom."""
-    return set_conf_directive("relay_reconnect_time", str(get_sys("relay_reconnect_s")))
+    changed = set_conf_directive("relay_reconnect_time", str(get_sys("relay_reconnect_s")))
+    return set_conf_directive("read_timeout", str(get_sys("source_timeout_s"))) or changed
 
 
 def write_relay_config():
@@ -1432,11 +1435,11 @@ def create_system_alert(username: str, reason: str, kind: str = "failover", tag:
     notify_alert({"type": kind, "username": username, "reason": reason, "detected_at": utcnow().isoformat()})
 
 
-def resolve_alerts_by_tag(tag: str):
+def resolve_alerts_by_tag(tag: str, suffix: str = ""):
     conn = db()
     try:
-        conn.execute("UPDATE alerts SET resolved_at=? WHERE session1_id=? AND resolved_at IS NULL",
-                     (utcnow().isoformat(), tag))
+        conn.execute("UPDATE alerts SET resolved_at=?, reason = reason || ? WHERE session1_id=? AND resolved_at IS NULL",
+                     (utcnow().isoformat(), suffix, tag))
         conn.commit()
     finally:
         conn.close()
@@ -1492,7 +1495,8 @@ def failover_health_check():
     _failover_state["using_backup"] = any(m["active"] for m in mappings if m["primary"] == "/RTCM32")
 
 
-_trimble_state = {"down": False, "fail": 0, "ok": 0, "since": None, "last_check": None, "reachable": None, "kb": {}}
+_trimble_state = {"down": False, "fail": 0, "ok": 0, "since": None, "last_check": None, "reachable": None, "kb": {},
+                  "incident_start": None}
 
 
 def trimble_health_check():
@@ -1515,23 +1519,37 @@ def trimble_health_check():
         st["ok"] += 1
         st["fail"] = 0
     else:
+        if st["fail"] == 0 and not st["down"]:
+            st["incident_start"] = utcnow()
         st["fail"] += 1
         st["ok"] = 0
     trimble = get_trimble_settings()
     if not st["down"] and st["fail"] >= get_sys("failover_fail_threshold"):
         st["down"], st["since"] = True, utcnow().isoformat()
-        if not_connected:
-            msg = f"Trimble nicht erreichbar: {trimble['host']} ({', '.join(not_connected)} nicht verbunden)"
+        # Was die Trimble selbst tut, sagt der Ping: antwortet sie, liegt der Fehler auf dem Weg dorthin
+        # (Netz/Tunnel) bzw. in der Verbindung des Casters -- nicht an der Basis.
+        ping = icmp_ping_ms(resolve_cached(trimble["host"]) or trimble["host"]) if get_sys("trimble_ping_s") else None
+        if not get_sys("trimble_ping_s"):
+            ping_txt = ""
+        elif ping is not None:
+            ping_txt = f" -- Trimble antwortet auf Ping ({ping} ms), der Caster baut die Verbindung neu auf"
         else:
-            msg = f"Trimble sendet keine Daten: {trimble['host']} ({', '.join(stalled)})"
+            ping_txt = " -- Trimble antwortet auch nicht auf Ping"
+        if not_connected:
+            msg = f"Trimble-Datenstrom unterbrochen: {trimble['host']} ({', '.join(not_connected)} nicht verbunden){ping_txt}"
+        else:
+            msg = f"Trimble sendet keine Daten: {trimble['host']} ({', '.join(stalled)}){ping_txt}"
         log_alert_engine(msg)
         create_system_alert("SYSTEM", msg, kind="trimble_down", tag="trimble-down")
     elif st["down"] and st["ok"] >= get_sys("failover_recover_threshold"):
-        st["down"], st["since"] = False, None
-        log_alert_engine("Trimble wieder erreichbar")
-        resolve_alerts_by_tag("trimble-down")
+        start = st.get("incident_start")
+        secs = int((utcnow() - start).total_seconds()) if start else None
+        dur = f" -- Unterbrechung ca. {secs // 60} min {secs % 60} s" if secs is not None else ""
+        st["down"], st["since"], st["incident_start"] = False, None, None
+        log_alert_engine(f"Trimble-Datenstrom wieder da{dur}")
+        resolve_alerts_by_tag("trimble-down", dur)
         notify_alert({"type": "trimble_up", "username": "SYSTEM",
-                      "reason": f"Trimble wieder erreichbar: {trimble['host']}", "detected_at": utcnow().isoformat()})
+                      "reason": f"Trimble-Datenstrom wieder da: {trimble['host']}{dur}", "detected_at": utcnow().isoformat()})
 
 
 _caster_wd = {"fail": 0}

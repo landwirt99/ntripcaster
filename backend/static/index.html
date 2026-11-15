@@ -329,6 +329,7 @@
         <label>Positionsverlauf aufbewahren (Tage): <input id="sysRetention" type="number" style="width:6rem"></label>
         <label>Ping zur Trimble alle (s, 0 = aus): <input id="sysPingS" type="number" min="0" max="3600" style="width:6rem"></label>
         <label>Relay-Wiederverbindung (s): <input id="sysRelayRe" type="number" min="5" max="600" style="width:6rem"></label>
+        <label>Datenstrom-Timeout (s): <input id="sysSrcTimeout" type="number" min="10" max="120" style="width:6rem"></label>
       </div>
       <div class="row">
         <strong style="width:100%">Belastung der Basisstation</strong>
@@ -339,6 +340,10 @@
       (Trimble oder fremder Caster), bevor er es erneut versucht (der Caster prueft im halben Takt, real also bis zu
       1,5-fach). Kleiner = Datenstrom kommt nach einer Netzstoerung schneller zurueck; gilt auch fuer Fremdcaster,
       deren Login abgelehnt wird (dort mehr Fehlversuche pro Minute). Speichern startet den Caster kurz neu.</p>
+      <p class="msg"><strong>Datenstrom-Timeout:</strong> bleiben die Daten einer Quelle (z.B. der Trimble) so lange aus,
+      wirft der Caster die Verbindung weg und alle Rover auf diesem Mountpoint verlieren den Strom (Standard des Casters:
+      16 s). Ein groesserer Wert ueberbrueckt kurze Netz-/Tunnelaussetzer, ohne dass die Verbindung neu aufgebaut werden
+      muss; bei wirklich toter Verbindung dauert die Erkennung entsprechend laenger. Speichern startet den Caster kurz neu.</p>
       <p class="msg">Die Trimble wird nur vom Caster angesprochen: eine Dauerverbindung je Strom, egal wie viele Rover
       angeschlossen sind. Erreichbarkeit/Datenfluss wird aus diesen Verbindungen abgelesen, es gibt keine eigenen
       Verbindungstests zur Basis. Angezeigt werden: Zustand, Alter der letzten Daten, Datenrate und die RTT beim
@@ -732,6 +737,7 @@ async function loadSystemSettings() {
   document.getElementById("sysCoverage").value = s.station_coverage_km;
   document.getElementById("sysPingS").value = s.trimble_ping_s;
   document.getElementById("sysRelayRe").value = s.relay_reconnect_s;
+  document.getElementById("sysSrcTimeout").value = s.source_timeout_s;
   document.getElementById("sysTrimbleLegacy").checked = !!s.trimble_legacy;
 }
 
@@ -751,6 +757,7 @@ async function saveSystemSettings() {
     station_coverage_km: num("sysCoverage"),
     trimble_ping_s: parseInt(document.getElementById("sysPingS").value),
     relay_reconnect_s: parseInt(document.getElementById("sysRelayRe").value),
+    source_timeout_s: parseInt(document.getElementById("sysSrcTimeout").value),
     trimble_legacy: document.getElementById("sysTrimbleLegacy").checked ? 1 : 0,
   };
   const r = await fetch("/api/system-settings", { method: "POST", headers: headers(), body: JSON.stringify(body) });
@@ -1295,7 +1302,7 @@ async function loadFailoverStatus() {
   }
   const tr = s.trimble || {};
   const trTxt = tr.reachable === null || tr.reachable === undefined ? ""
-    : (tr.reachable ? "Trimble erreichbar | " : "TRIMBLE NICHT ERREICHBAR | ");
+    : (tr.reachable ? "Trimble-Datenstrom OK | " : "TRIMBLE-DATENSTROM UNTERBROCHEN | ");
   document.getElementById("failoverStatusText").innerText =
     `${trTxt}${txt} | letzte Pruefung: ${s.last_check || "-"} | letzter Wechsel: ${s.last_switch || "noch nie"}`;
 }
