@@ -105,6 +105,11 @@ async def auth_rate_limit(request: Request, call_next):
         lst = _AUTH_FAILS.setdefault(ip, [])
         if not lst or time.time() - lst[-1] >= AUTH_FAIL_MIN_GAP:
             lst.append(time.time())
+            if len(lst) == AUTH_FAIL_LIMIT:      # Schwelle erreicht -> Alarm (einmal je Sperre)
+                threading.Thread(
+                    target=create_system_alert,
+                    args=("SYSTEM", f"GUI-Login: {AUTH_FAIL_LIMIT} Fehlversuche von {ip} -- IP fuer {AUTH_FAIL_WINDOW // 60} Min. gesperrt"),
+                    kwargs={"kind": "gui_login"}, daemon=True).start()
     return response
 
 
@@ -1350,15 +1355,27 @@ def get_live_mountpoints():
     return data
 
 
-def create_system_alert(username: str, reason: str):
+def create_system_alert(username: str, reason: str, kind: str = "failover", tag: str | None = None):
+    """Legt einen Systemalarm an. `tag` (in session1_id) erlaubt, ihn spaeter automatisch zu beenden;
+    `kind` ist der Typ in der Webhook-Meldung."""
     conn = db()
     conn.execute(
-        "INSERT INTO alerts (username, reason, detected_at) VALUES (?,?,?)",
-        (username, reason, utcnow().isoformat()),
+        "INSERT INTO alerts (username, session1_id, reason, detected_at) VALUES (?,?,?,?)",
+        (username, tag, reason, utcnow().isoformat()),
     )
     conn.commit()
     conn.close()
-    notify_alert({"type": "failover", "username": username, "reason": reason, "detected_at": utcnow().isoformat()})
+    notify_alert({"type": kind, "username": username, "reason": reason, "detected_at": utcnow().isoformat()})
+
+
+def resolve_alerts_by_tag(tag: str):
+    conn = db()
+    try:
+        conn.execute("UPDATE alerts SET resolved_at=? WHERE session1_id=? AND resolved_at IS NULL",
+                     (utcnow().isoformat(), tag))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 _failover_primary_state: dict = {}
@@ -1410,12 +1427,51 @@ def failover_health_check():
     _failover_state["using_backup"] = any(m["active"] for m in mappings if m["primary"] == "/RTCM32")
 
 
+_trimble_state = {"down": False, "fail": 0, "ok": 0, "since": None, "last_check": None, "reachable": None}
+
+
+def trimble_health_check():
+    """Prueft, ob die Basisstation (beide Ausgabe-Ports) per TCP erreichbar ist -- unabhaengig davon,
+    ob ein Backup eingetragen ist. Alarm nach `failover_fail_threshold` Fehlschlaegen in Folge;
+    der Alarm endet automatisch, sobald sie `failover_recover_threshold` Mal in Folge wieder antwortet."""
+    trimble = get_trimble_settings()
+    ports = (trimble["port_legacy"], trimble["port_msm"])
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pings = list(pool.map(lambda p: tcp_ping_ms(trimble["host"], p, timeout=3.0), ports))
+    ok = all(p is not None for p in pings)
+    st = _trimble_state
+    st["last_check"] = utcnow().isoformat()
+    st["reachable"] = ok
+    if ok:
+        st["ok"] += 1
+        st["fail"] = 0
+    else:
+        st["fail"] += 1
+        st["ok"] = 0
+    if not st["down"] and st["fail"] >= get_sys("failover_fail_threshold"):
+        st["down"], st["since"] = True, utcnow().isoformat()
+        bad = ", ".join(str(p) for p, ms in zip(ports, pings) if ms is None)
+        msg = f"Trimble nicht erreichbar: {trimble['host']} (Port {bad})"
+        log_alert_engine(msg)
+        create_system_alert("SYSTEM", msg, kind="trimble_down", tag="trimble-down")
+    elif st["down"] and st["ok"] >= get_sys("failover_recover_threshold"):
+        st["down"], st["since"] = False, None
+        log_alert_engine("Trimble wieder erreichbar")
+        resolve_alerts_by_tag("trimble-down")
+        notify_alert({"type": "trimble_up", "username": "SYSTEM",
+                      "reason": f"Trimble wieder erreichbar: {trimble['host']}", "detected_at": utcnow().isoformat()})
+
+
 def failover_loop():
     while True:
         try:
             failover_health_check()
         except Exception as e:
             log_alert_engine(f"Fehler im Failover-Check: {e}")
+        try:
+            trimble_health_check()
+        except Exception as e:
+            log_alert_engine(f"Fehler im Trimble-Check: {e}")
         time.sleep(FAILOVER_CHECK_INTERVAL)
 
 
@@ -1469,7 +1525,7 @@ def update_failover_settings(body: FailoverSettings, x_admin_token: str | None =
 @app.get("/api/failover-status")
 def get_failover_status(x_admin_token: str | None = Header(default=None)):
     check_token(x_admin_token)
-    return _failover_state
+    return {**_failover_state, "trimble": _trimble_state}
 
 
 def ntrip_probe(host: str, port: int, mountpoint: str, user: str, password: str, timeout: float = 6.0):

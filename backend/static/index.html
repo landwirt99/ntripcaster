@@ -341,7 +341,12 @@
       "Stationen" fest (Spalte "Backup fuer").</p>
       <div class="msg" id="manualSwitchMsg"></div>
 
-      <h2 style="margin-top:2rem">Mehrfachnutzungs-Alarm</h2>
+      <h2 style="margin-top:2rem">Alarme</h2>
+      <p class="msg">Eingebaute Alarme (Banner im Status-Tab, optional per Webhook): Mehrfachnutzung eines Logins,
+      Trimble nicht erreichbar (endet automatisch, sobald sie wieder antwortet), Failover aktiv/beendet,
+      zu viele GUI-Login-Fehlversuche (IP gesperrt). Schwellen fuer Trimble/Failover: Systemeinstellungen
+      "Ausfall nach Pruefungen" (Pruefung alle 15 s).</p>
+      <h2 style="margin-top:1rem">Mehrfachnutzungs-Alarm</h2>
       <div class="row">
         <label>Karenzzeit (Sekunden):
           <input id="alertGrace" type="number" style="width:6rem" value="60">
@@ -1252,8 +1257,11 @@ async function loadFailoverStatus() {
       return `${m.primary === "/RTCM32" ? "Trimble (/RTCM32)" : m.primary}: ${state}${m.forced ? " [manuell]" : ""}`;
     }).join(" | ");
   }
+  const tr = s.trimble || {};
+  const trTxt = tr.reachable === null || tr.reachable === undefined ? ""
+    : (tr.reachable ? "Trimble erreichbar | " : "TRIMBLE NICHT ERREICHBAR | ");
   document.getElementById("failoverStatusText").innerText =
-    `${txt} | letzte Pruefung: ${s.last_check || "-"} | letzter Wechsel: ${s.last_switch || "noch nie"}`;
+    `${trTxt}${txt} | letzte Pruefung: ${s.last_check || "-"} | letzter Wechsel: ${s.last_switch || "noch nie"}`;
 }
 
 // --- Regional-Stationen (konfigurierbar) ---------------------------------
