@@ -78,7 +78,8 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
 
 
 # Fehlversuche bei der Token-Pruefung pro Client-IP begrenzen (Brute-Force-Schutz)
-AUTH_FAIL_LIMIT = 8
+AUTH_FAIL_LIMIT = 10
+AUTH_FAIL_MIN_GAP = 3.0   # parallele Requests EINER Seite zaehlen zusammen als ein Fehlversuch
 AUTH_FAIL_WINDOW = 300  # Sekunden
 _AUTH_FAILS: dict = {}
 
@@ -96,12 +97,14 @@ async def auth_rate_limit(request: Request, call_next):
         else:
             _AUTH_FAILS.pop(ip, None)
         if len(fails) >= AUTH_FAIL_LIMIT:
-            return JSONResponse({"detail": "too many failed attempts, try again later"}, status_code=429)
+            return JSONResponse({"detail": "Zu viele Fehlversuche -- bitte einige Minuten warten"}, status_code=429)
     response = await call_next(request)
     if is_api and response.status_code == 401:
         if len(_AUTH_FAILS) > 1000:
             _AUTH_FAILS.clear()
-        _AUTH_FAILS.setdefault(ip, []).append(time.time())
+        lst = _AUTH_FAILS.setdefault(ip, [])
+        if not lst or time.time() - lst[-1] >= AUTH_FAIL_MIN_GAP:
+            lst.append(time.time())
     return response
 
 

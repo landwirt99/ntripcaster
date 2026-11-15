@@ -396,11 +396,38 @@ async function tryShowApp() {
   if (r.ok) {
     document.getElementById("login").style.display = "none";
     document.getElementById("app").style.display = "block";
+    document.getElementById("loginMsg").innerText = "";
     refreshAll();
-  } else {
-    document.getElementById("loginMsg").innerText = "Falsches Token.";
+  } else if (r.status === 429) {
+    document.getElementById("loginMsg").innerText = "Zu viele Fehlversuche -- bitte einige Minuten warten.";
+  } else if (r.status !== 401) {
+    document.getElementById("loginMsg").innerText = "Server nicht erreichbar oder Fehler (" + r.status + ").";
   }
 }
+
+// Ungueltiges/geaendertes Token: sofort abmelden statt mit dem alten Token weiter zu pollen
+// (viele Fehlversuche loesen die Sperre der IP aus).
+let _unauthAt = 0;
+function handleUnauthorized() {
+  if (Date.now() - _unauthAt < 2000) return;   // mehrere parallele 401 einer Seite nur einmal behandeln
+  _unauthAt = Date.now();
+  const wasLoggedIn = getComputedStyle(document.getElementById("app")).display !== "none";
+  token = "";
+  localStorage.removeItem("ntrip_admin_token");
+  _jsonCache.clear();
+  document.getElementById("app").style.display = "none";
+  document.getElementById("login").style.display = "block";
+  document.getElementById("loginMsg").innerText = wasLoggedIn
+    ? "Token ungueltig oder geaendert -- bitte neu anmelden."
+    : "Falsches Token.";
+}
+const _origFetch = window.fetch.bind(window);
+window.fetch = async (...args) => {
+  const res = await _origFetch(...args);
+  const url = typeof args[0] === "string" ? args[0] : "";
+  if (res.status === 401 && url.startsWith("/api/") && !url.startsWith("/api/settings/admin-token")) handleUnauthorized();
+  return res;
+};
 
 function showPage(pageId) {
   document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
