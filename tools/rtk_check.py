@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 landwirt99
 """Verbindet sich wie ein echter NTRIP-Client, sammelt den rohen RTCM3-Strom
 fuer ein paar Sekunden und prueft, ob alles fuer einen RTK-Fix noetige
 vorhanden ist (Referenzposition 1005/1006, MSM-Beobachtungen mehrerer

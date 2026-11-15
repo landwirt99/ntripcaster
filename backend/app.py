@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 landwirt99
 """
 NTRIP Backend (S3) — Benutzerverwaltung -> .aut-Dateien -> Caster-Rehash
 

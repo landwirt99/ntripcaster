@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 landwirt99
 set -e
 
 # Erzeugt users.aut/groups.aut/clientmounts.aut synchron aus der Backend-DB,

@@ -60,3 +60,8 @@ danach aendert man sie in der GUI (Einstellungen). Dort stehen auch alle weitere
 - Der Admin-Bereich des Casters (`/admin`, `/oper`) wird vom Proxy nach aussen nie durchgereicht.
 - `data/` (Datenbank, Konfiguration, Logs) gehoert nicht ins Repository.
 - Der Caster unter `build/` steht unter der GPL (BKG NtripCaster); Hinweise dort in `COPYING`.
+
+## Lizenz
+
+Eigener Code: **GPL-3.0-or-later** (siehe [`LICENSE`](LICENSE)). Enthaltener BKG NtripCaster: GPL, Copyright
+BKG; Details, Drittkomponenten und Kartenquellen in [`NOTICE.md`](NOTICE.md).

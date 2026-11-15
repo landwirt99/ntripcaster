@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 landwirt99
 # Baut das Image aus diesem Ordner und legt den Container "ntrip-allinone" neu an.
 # Alle Daten (DB, Caster-Konfiguration, Logs) liegen in ./data und bleiben erhalten.
 # Umgebungsvariablen, Ports und Mounts werden vom laufenden Container uebernommen.
