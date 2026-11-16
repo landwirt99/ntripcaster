@@ -2419,12 +2419,27 @@ def disconnect_event(ev: DisconnectEvent):
     return {"ok": True}
 
 
+def station_position(mountpoint, stations=None, base=None):
+    """Position der Station hinter einem Mountpoint: /RTCM, /RTCM32 = eigene Basis (Trimble),
+    sonst die Regional-Station mit diesem Namen. None, wenn unbekannt."""
+    if not mountpoint:
+        return None
+    key = mountpoint.lstrip("/")
+    if key in ("RTCM", "RTCM32"):
+        return base or get_base_position()
+    for s in (stations if stations is not None else get_all_regional_stations()):
+        if s["key"] == key:
+            return (s["lat"], s["lon"])
+    return None
+
+
 @app.post("/internal/gga-event", dependencies=[Depends(require_local)])
 def gga_event(ev: GgaEvent):
     now = utcnow().isoformat()
-    base_lat, base_lon = get_base_position()
-    distance_km = round(haversine_km(base_lat, base_lon, ev.lat, ev.lon), 2)
     conn = db()
+    row = conn.execute("SELECT last_mountpoint FROM machine_status WHERE username=?", (ev.username,)).fetchone()
+    pos = station_position(row["last_mountpoint"] if row else None) or get_base_position()
+    distance_km = round(haversine_km(pos[0], pos[1], ev.lat, ev.lon), 2)
     conn.execute(
         """
         INSERT INTO machine_status (username, online, last_seen, last_lat, last_lon,
@@ -2569,8 +2584,19 @@ def machine_status(x_admin_token: str | None = Header(default=None)):
     conn.close()
     result = []
     now = utcnow()
+    stations = get_all_regional_stations()
+    base = get_base_position()
     for r in rows:
         d = dict(r)
+        # Distanz immer zur Station, auf der der Rover gerade haengt (bei /NEAR die gewaehlte Station,
+        # bei Failover die einspringende) -- nicht pauschal zur Trimble.
+        pos = station_position(d.get("last_mountpoint"), stations, base)
+        if d.get("last_lat") is not None and d.get("last_lon") is not None and pos:
+            d["last_distance_km"] = round(haversine_km(pos[0], pos[1], d["last_lat"], d["last_lon"]), 2)
+            d["distance_station"] = d["last_mountpoint"].lstrip("/")
+        else:
+            d["last_distance_km"] = None
+            d["distance_station"] = None
         if d["online"] and d["last_seen"]:
             try:
                 last = datetime.fromisoformat(d["last_seen"])

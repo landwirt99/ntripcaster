@@ -119,7 +119,7 @@
 
           <h2 style="margin-top:2rem">Status (Live)</h2>
           <table id="machineStatusTable">
-            <thead><tr><th data-sort="text">Maschine</th><th data-sort="text">Status</th><th data-sort="text">Mountpoint</th><th data-sort="text">Online seit / zuletzt gesehen</th><th data-sort="text">Position</th><th data-sort="num">Satelliten</th><th data-sort="text">Qualitaet</th><th data-sort="num">Distanz zur Basis</th></tr></thead>
+            <thead><tr><th data-sort="text">Maschine</th><th data-sort="text">Status</th><th data-sort="text">Mountpoint</th><th data-sort="text">Online seit / zuletzt gesehen</th><th data-sort="text">Position</th><th data-sort="num">Satelliten</th><th data-sort="text">Qualitaet</th><th data-sort="num">Distanz zur Station</th></tr></thead>
             <tbody></tbody>
           </table>
 
@@ -518,7 +518,8 @@ async function loadMachineStatus() {
     const pos = (m.last_lat && m.last_lon)
       ? `<a href="javascript:void(0)" onclick="zoomToMachine('${esc(m.username)}')" style="color:#38bdf8;text-decoration:underline;cursor:pointer;">${m.last_lat.toFixed(5)}, ${m.last_lon.toFixed(5)}</a>`
       : "-";
-    const dist = (m.last_distance_km != null) ? m.last_distance_km + " km" : "-";
+    const dist = (m.last_distance_km != null)
+      ? `${m.last_distance_km} km <span class="msg">(${esc(m.distance_station || "")})</span>` : "-";
     const requested = m.last_requested_mountpoint || m.last_mountpoint || "-";
     const resolved = m.last_mountpoint || "-";
     const mountpointTxt = (requested !== resolved && requested === "/NEAR")
@@ -550,15 +551,14 @@ async function loadUsers() {
       <td>${esc(u.username)}</td>
       <td>
         <input id="${rowId}" type="text" value="${esc(u.password)}" style="width:8rem">
-        <button class="secondary" onclick="changeUserPassword('${esc(u.username)}', '${rowId}')">Speichern</button>
       </td>
       <td class="${u.active ? 'badge-active' : 'badge-inactive'}">${u.active ? 'Aktiv' : 'Gesperrt'}</td>
       <td>${u.max_connections}</td>
       <td>
         <input id="${validId}" type="date" value="${u.valid_until || ''}" style="width:9rem">
-        <button class="secondary" onclick="changeValidUntil('${esc(u.username)}', '${validId}')">Speichern</button>
       </td>
       <td>
+        <button onclick="saveUser('${esc(u.username)}', '${rowId}', '${validId}')">Speichern</button>
         <button class="secondary" onclick="toggleActive('${esc(u.username)}', ${u.active ? false : true})">${u.active ? 'Sperren' : 'Freigeben'}</button>
         <button class="danger" onclick="deleteUser('${esc(u.username)}')">Loeschen</button>
       </td>`;
@@ -566,24 +566,20 @@ async function loadUsers() {
   }
 }
 
-async function changeValidUntil(username, inputId) {
-  const newDate = document.getElementById(inputId).value;
-  await fetch("/api/users/" + encodeURIComponent(username), {
+async function saveUser(username, pwId, validId) {
+  const body = { valid_until: document.getElementById(validId).value || null };
+  const password = document.getElementById(pwId).value;
+  if (password) body.password = password;
+  const r = await fetch("/api/users/" + encodeURIComponent(username), {
     method: "PATCH",
     headers: headers(),
-    body: JSON.stringify({ valid_until: newDate || null })
+    body: JSON.stringify(body)
   });
-  refreshAll();
-}
-
-async function changeUserPassword(username, inputId) {
-  const newPassword = document.getElementById(inputId).value;
-  if (!newPassword) return;
-  await fetch("/api/users/" + encodeURIComponent(username), {
-    method: "PATCH",
-    headers: headers(),
-    body: JSON.stringify({ password: newPassword })
-  });
+  if (!r.ok) {
+    const err = await r.json();
+    alert("Speichern fehlgeschlagen: " + (err.detail || r.status));
+    return;
+  }
   refreshAll();
 }
 
@@ -1062,7 +1058,7 @@ async function updateMap() {
     }
     const pos = [m.last_lat, m.last_lon];
     bounds.push(pos);
-    const popupText = `<strong>${esc(m.username)}</strong><br>${m.online ? "Online" : "Offline"}<br>${m.fix_quality_label}, ${m.last_sat_count ?? "-"} Sat.<br>Distanz: ${m.last_distance_km ?? "-"} km`;
+    const popupText = `<strong>${esc(m.username)}</strong><br>${m.online ? "Online" : "Offline"}<br>${m.fix_quality_label}, ${m.last_sat_count ?? "-"} Sat.<br>Distanz zu ${esc(m.distance_station || "Station")}: ${m.last_distance_km ?? "-"} km`;
     if (machineMarkers[m.username]) {
       machineMarkers[m.username].setLatLng(pos);
       machineMarkers[m.username].setIcon(machineIcon(m.online, m.last_fix_quality));
