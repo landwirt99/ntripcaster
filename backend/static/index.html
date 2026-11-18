@@ -125,7 +125,7 @@
 
           <h2 style="margin-top:2rem">Benutzer / Maschinen</h2>
           <table id="usersTable">
-            <thead><tr><th data-sort="text">Username</th><th>Passwort</th><th data-sort="text">Status</th><th data-sort="num">Max. Verbindungen</th><th data-sort="text">Gueltig bis</th><th></th></tr></thead>
+            <thead><tr><th data-sort="text">Username</th><th>Passwort</th><th data-sort="text">Status</th><th>Max. Verbindungen</th><th data-sort="text">Gueltig bis</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
 
@@ -516,7 +516,7 @@ async function loadMachineStatus() {
     const statusTxt = m.online ? `<span class="badge-online">&#9679; Online</span> seit ${timeAgo(m.online_since)}`
                                 : `<span class="badge-offline">&#9679; Offline</span> zuletzt vor ${timeAgo(m.last_seen)}`;
     const pos = (m.last_lat && m.last_lon)
-      ? `<a href="javascript:void(0)" onclick="zoomToMachine('${esc(m.username)}')" style="color:#38bdf8;text-decoration:underline;cursor:pointer;">${m.last_lat.toFixed(5)}, ${m.last_lon.toFixed(5)}</a>`
+      ? `<a href="javascript:void(0)" onclick="zoomToMachine('${esc(m.username)}', ${m.last_lat}, ${m.last_lon})" style="color:#38bdf8;text-decoration:underline;cursor:pointer;">${m.last_lat.toFixed(5)}, ${m.last_lon.toFixed(5)}</a>`
       : "-";
     const dist = (m.last_distance_km != null)
       ? `${m.last_distance_km} km <span class="msg">(${esc(m.distance_station || "")})</span>` : "-";
@@ -547,18 +547,19 @@ async function loadUsers() {
     const tr = document.createElement("tr");
     const rowId = "pw_" + u.username.replace(/[^a-zA-Z0-9]/g, "_");
     const validId = "valid_" + u.username.replace(/[^a-zA-Z0-9]/g, "_");
+    const connId = "mc_" + u.username.replace(/[^a-zA-Z0-9]/g, "_");
     tr.innerHTML = `
       <td>${esc(u.username)}</td>
       <td>
         <input id="${rowId}" type="text" value="${esc(u.password)}" style="width:8rem">
       </td>
       <td class="${u.active ? 'badge-active' : 'badge-inactive'}">${u.active ? 'Aktiv' : 'Gesperrt'}</td>
-      <td>${u.max_connections}</td>
+      <td><input id="${connId}" type="number" min="1" max="100" value="${u.max_connections}" style="width:4.5rem"></td>
       <td>
         <input id="${validId}" type="date" value="${u.valid_until || ''}" style="width:9rem">
       </td>
       <td>
-        <button onclick="saveUser('${esc(u.username)}', '${rowId}', '${validId}')">Speichern</button>
+        <button onclick="saveUser('${esc(u.username)}', '${rowId}', '${validId}', '${connId}')">Speichern</button>
         <button class="secondary" onclick="toggleActive('${esc(u.username)}', ${u.active ? false : true})">${u.active ? 'Sperren' : 'Freigeben'}</button>
         <button class="danger" onclick="deleteUser('${esc(u.username)}')">Loeschen</button>
       </td>`;
@@ -566,8 +567,11 @@ async function loadUsers() {
   }
 }
 
-async function saveUser(username, pwId, validId) {
+async function saveUser(username, pwId, validId, connId) {
   const body = { valid_until: document.getElementById(validId).value || null };
+  const mc = parseInt(document.getElementById(connId).value);
+  if (!(mc >= 1 && mc <= 100)) { alert("Max. Verbindungen: Zahl von 1 bis 100"); return; }
+  body.max_connections = mc;
   const password = document.getElementById(pwId).value;
   if (password) body.password = password;
   const r = await fetch("/api/users/" + encodeURIComponent(username), {
@@ -891,7 +895,7 @@ async function loadHistory() {
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${p.ts}</td>
-      <td>${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}</td>
+      <td><a href="javascript:void(0)" onclick="zoomHistory(${p.lat}, ${p.lon}, '${esc(p.ts)}')" style="color:#38bdf8;text-decoration:underline;cursor:pointer;">${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}</a></td>
       <td>${p.sat_count ?? '-'}</td>
       <td>${p.fix_quality}</td>`;
     tbody.appendChild(tr);
@@ -949,13 +953,43 @@ function centerMap() {
   }
 }
 
-function zoomToMachine(username) {
+let focusPin = null;
+function focusPoint(mapObj, lat, lon, html, zoom) {
+  if (focusPin) { focusPin.remove(); focusPin = null; }
+  mapObj.invalidateSize();
+  mapObj.setView([lat, lon], zoom);
+  const pin = L.circleMarker([lat, lon], { radius: 9, color: "white", weight: 2, fillColor: "#f59e0b", fillOpacity: 1 })
+    .addTo(mapObj).bindPopup(html).openPopup();
+  pin.on("popupclose", () => { pin.remove(); if (focusPin === pin) focusPin = null; });
+  focusPin = pin;
+  const el = mapObj.getContainer();
+  if (el && el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function zoomHistory(lat, lon, ts) {
+  initHistoryMap();
+  focusPoint(historyMap, lat, lon, `${esc(ts)}<br>${lat.toFixed(5)}, ${lon.toFixed(5)}`, 18);
+}
+
+function zoomEuStation(idx) {
+  const s = lastSearchResults[idx];
+  if (!s || !euMap) return;
+  focusPoint(euMap, s.lat, s.lon, `<strong>${esc(s.identifier)}</strong><br>${esc(s.mountpoint)}`, 12);
+}
+
+function zoomToMachine(username, lat, lon) {
   showPage("page-status");
   const doZoom = () => {
+    map.invalidateSize();
     const marker = machineMarkers[username];
     if (marker) {
       map.setView(marker.getLatLng(), 17);
       marker.openPopup();
+      const el = map.getContainer();
+      if (el && el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } else if (lat != null && lon != null) {
+      // Letzte Position ist aelter als heute und daher nicht als Marker auf der Karte
+      focusPoint(map, lat, lon, `<strong>${esc(username)}</strong><br>letzte bekannte Position`, 17);
     }
   };
   if (map) {
@@ -1113,7 +1147,8 @@ function makeSortable(tableId) {
   if (!table || table.dataset.sortableInit) return;
   table.dataset.sortableInit = "1";
   const headers = table.querySelectorAll("thead th[data-sort]");
-  headers.forEach((th, colIndex) => {
+  headers.forEach((th) => {
+    const colIndex = th.cellIndex;
     th.addEventListener("click", () => {
       const type = th.dataset.sort;
       const asc = !th.classList.contains("sort-asc");
@@ -1493,7 +1528,7 @@ async function searchEurefStations() {
       <td>${esc(s.identifier)}</td>
       <td>${esc(s.format)}</td>
       <td>${esc(s.country)}</td>
-      <td>${s.lat.toFixed(3)}, ${s.lon.toFixed(3)}</td>
+      <td><a href="javascript:void(0)" onclick="zoomEuStation(${idx})" style="color:#38bdf8;text-decoration:underline;cursor:pointer;">${s.lat.toFixed(3)}, ${s.lon.toFixed(3)}</a></td>
       <td>${addBtn}</td>`;
     tbody.appendChild(tr);
   });
