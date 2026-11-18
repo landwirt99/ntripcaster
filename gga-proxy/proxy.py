@@ -643,6 +643,8 @@ async def pump_server_to_client(reader, writer, session: dict, ctx: dict, on_sta
                     chunked = bool(re.search(rb"(?im)^transfer-encoding:\s*chunked", hdr))
                     first_line = hdr.split(b"\r\n", 1)[0]
                     ok = b" 200" in first_line
+                    sm = re.match(rb"HTTP/1\.[01] (\d{3})", first_line)
+                    ctx["status"] = int(sm.group(1)) if sm else None
                 else:
                     hdr = b""
                     body = bytes(head)
@@ -912,6 +914,10 @@ async def _handle_client(client_reader, client_writer, client_ip: str):
         await server_writer.drain()
 
         async def on_status(ok: bool):
+            if not ok and username and ctx.get("status") == 503:
+                # Caster weist den (angemeldeten) Benutzer ab, meist wegen max_connections -> Alarm in der GUI
+                await notify_backend("/internal/refused-event", {
+                    "username": username, "ip": client_ip, "mountpoint": mountpoint, "status": 503})
             if ok and username:
                 session["connected"] = True
                 await notify_backend("/internal/connect-event", {
@@ -924,6 +930,7 @@ async def _handle_client(client_reader, client_writer, client_ip: str):
 
         switch_target = {"value": None}
         ctx["got_head"] = False
+        ctx["status"] = None
         ctx["target"] = current_target
         client_task = asyncio.create_task(pump_client_to_server(client_reader, server_writer, session, switch_target, logical_target))
         server_task = asyncio.create_task(pump_server_to_client(server_reader, client_writer, session, ctx, on_status))

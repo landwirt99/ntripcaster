@@ -2367,6 +2367,7 @@ class GgaEvent(BaseModel):
 def connect_event(ev: ConnectEvent):
     now = utcnow().isoformat()
     conn = db()
+    is_new = conn.execute("SELECT 1 FROM sessions WHERE session_id=?", (ev.session_id,)).fetchone() is None
     # Verwaiste alte Sessions DERSELBEN IP automatisch schliessen (eindeutig
     # dasselbe Geraet, das neu verbunden hat -- z.B. nach einem Container-
     # Neustart, bei dem das Disconnect-Event nie gefeuert wurde). Nur
@@ -2393,6 +2394,63 @@ def connect_event(ev: ConnectEvent):
     )
     conn.commit()
     conn.close()
+    if is_new:
+        _refused_count.pop(ev.username, None)
+        resolve_alerts_by_tag(f"limit-{ev.username}", " -- danach wieder verbunden")
+    return {"ok": True}
+
+
+class RefusedEvent(BaseModel):
+    username: str
+    ip: str | None = None
+    mountpoint: str | None = None
+    status: int | None = None
+
+
+_refused_count: dict = {}
+
+
+@app.post("/internal/refused-event", dependencies=[Depends(require_local)])
+def refused_event(ev: RefusedEvent):
+    """Der Caster hat einen angemeldeten Benutzer abgewiesen (503, Verbindungslimit). Pro Benutzer gibt es
+    einen offenen Alarm, der bei weiteren Versuchen hochgezaehlt wird und endet, sobald sich der Benutzer
+    wieder neu verbinden kann."""
+    conn = db()
+    try:
+        u = conn.execute("SELECT max_connections FROM users WHERE username=?", (ev.username,)).fetchone()
+        if not u:
+            return {"ok": True, "ignored": True}
+        open_s = conn.execute(
+            "SELECT ip, mountpoint, started_at FROM sessions WHERE username=? AND ended_at IS NULL ORDER BY started_at",
+            (ev.username,)).fetchall()
+    finally:
+        conn.close()
+    mx = u["max_connections"]
+    ip = (ev.ip or "?")[:64]
+    mp = (ev.mountpoint or "?")[:64]
+    now = utcnow()
+    tag = f"limit-{ev.username}"
+    if len(open_s) >= mx:
+        running = ", ".join(f"{s['ip']} auf {s['mountpoint']} seit {str(s['started_at'])[11:16]} UTC" for s in open_s)
+        detail = f"Laufend: {running}."
+    else:
+        detail = (f"Der Caster meldet das Limit, obwohl hier nur {len(open_s)} Sitzung(en) bekannt sind -- "
+                  f"vermutlich haengt eine abgerissene Verbindung noch beim Caster.")
+    conn = db()
+    try:
+        open_alert = conn.execute("SELECT id FROM alerts WHERE session1_id=? AND resolved_at IS NULL", (tag,)).fetchone()
+        n = (_refused_count.get(ev.username, 0) + 1) if open_alert else 1
+        _refused_count[ev.username] = n
+        reason = (f"Verbindung abgelehnt (max. {mx} gleichzeitig): Versuch von {ip} auf {mp}. {detail} "
+                  f"Abgewiesen: {n}x, zuletzt {now.strftime('%H:%M:%S')} UTC. "
+                  f"Abhilfe: \"Max. Verbindungen\" unter Benutzer / Maschinen erhoehen.")
+        if open_alert:
+            conn.execute("UPDATE alerts SET reason=? WHERE id=?", (reason, open_alert["id"]))
+            conn.commit()
+    finally:
+        conn.close()
+    if not open_alert:
+        create_system_alert(ev.username, reason, kind="connection_refused", tag=tag)
     return {"ok": True}
 
 
